@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.copilot_pending_diffs.json
+*.vcd
+*.out

@@ -1,0 +1,109 @@
+"""Thin wrapper around Nebius Token Factory (OpenAI-API-compatible) plus a
+tool-calling agent loop.
+
+Nebius Token Factory speaks the same wire protocol as the OpenAI SDK, so we
+just point the client at Nebius's base_url with our Token Factory API key.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Callable
+
+from openai import OpenAI
+
+from .config import settings
+
+_client: OpenAI | None = None
+
+
+def get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI(api_key=settings.nebius_api_key, base_url=settings.nebius_base_url)
+    return _client
+
+
+SYSTEM_PROMPT = """\
+You are a hardware design copilot. You help with the following active \
+projects: RISC-V/SIMT core, custom ISA, micro-NPU, MXINT8 GEMM accelerator, \
+and a DSP-FPGA (FIR/FFT) project. Use the tools you're given to check \
+project memory before answering questions about status, and to actually \
+carry out tasks (running testbenches, checking lint, drafting spec text, \
+etc.) rather than just describing what you'd do.
+
+Never call apply_diff unless the user has explicitly approved a diff you \
+already showed them via modify_module. If unsure whether you have approval, \
+ask first.
+"""
+
+
+def run_agent_loop(
+    user_message: str,
+    history: list[dict],
+    tool_schemas: list[dict],
+    tool_impls: dict[str, Callable[..., dict]],
+    confirm_tool_call: Callable[[str, dict], bool] | None = None,
+    max_turns: int = 8,
+) -> tuple[str, list[dict]]:
+    """Runs one user turn through the agent, executing tool calls as needed.
+
+    confirm_tool_call(name, args) -> bool lets the caller (e.g. the CLI)
+    gate sensitive tools like apply_diff behind an explicit yes/no before
+    they actually run. If it returns False, the tool is skipped and the
+    model is told the call was declined.
+
+    Returns (final_text_response, updated_history).
+    """
+    client = get_client()
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": user_message}]
+
+    for _ in range(max_turns):
+        response = client.chat.completions.create(
+            model=settings.nebius_model,
+            messages=messages,
+            tools=tool_schemas,
+            tool_choice="auto",
+        )
+        choice = response.choices[0]
+        msg = choice.message
+        messages.append(msg.model_dump(exclude_none=True))
+
+        if not msg.tool_calls:
+            return msg.content or "", messages[1:]  # drop system prompt from returned history
+
+        for call in msg.tool_calls:
+            name = call.function.name
+            try:
+                args = json.loads(call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+
+            if confirm_tool_call is not None and name in _CONFIRM_REQUIRED and not confirm_tool_call(name, args):
+                result = {"status": "declined", "message": "User did not approve this action."}
+            elif name not in tool_impls:
+                result = {"status": "error", "message": f"Unknown tool '{name}'"}
+            else:
+                try:
+                    result = tool_impls[name](**args)
+                except Exception as exc:  # noqa: BLE001 - surface to the model, don't crash the loop
+                    result = {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": json.dumps(result, default=str),
+                }
+            )
+
+    return (
+        "I've hit the tool-call limit for this turn without reaching a final answer — "
+        "try breaking the request into smaller steps.",
+        messages[1:],
+    )
+
+
+# Tools that must go through the CLI's confirmation prompt, regardless of
+# what confirm_tool_call's caller passes in for everything else.
+_CONFIRM_REQUIRED = {"apply_diff"}
