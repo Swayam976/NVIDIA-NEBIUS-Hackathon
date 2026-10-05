@@ -10,7 +10,7 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 3 | Install iverilog + verilator, confirm testbench_runner / lint_checker work | Claude | done |
 | 4 | Unit tests for memory.py | Codex (codex-work) | todo |
 | 5 | Real modify -> diff -> approve -> apply loop on one small GEMM change | Claude | todo |
-| 6 | Serverless Job (cron) for daily_brief | Claude | todo |
+| 6 | Serverless Job (cron) for daily_brief | Claude | in progress (Claude) |
 | 7 | Serverless Endpoint for demo URL | Claude | todo |
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
@@ -18,6 +18,24 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 6 code committed (still in progress: needs a live
+  Nebius run). Nebius Serverless Jobs have no cron (CLI ref, jobs docs,
+  changelog to 2026-09), so per Swayam: Windows Task Scheduler ->
+  scripts/run-daily-brief.sh in WSL (nebius CLI is Linux/macOS only) ->
+  `nebius ai job create` on cpu-d3/2vcpu-8gb, python:3.12 image, entry
+  script + local memory files via --inject-file, API key via --env-secret
+  (MysteryBox, never in the job spec), brief to job logs. Entry clones
+  GitHub main, so code must be pushed. src/copilot/brief.py = one tool-less
+  Nemotron call (can't reach apply_diff). Verified: live brief locally;
+  full job simulated in Docker python:3.12 (exit 0); trigger args checked
+  offline with a stub CLI; flags checked vs nebius CLI 0.12.284 --help.
+  Fixed UTC date in container -> BRIEF_DATE from local machine.
+  Codex round 1: .env quote/comment parsing (fixed in shell; WSL python
+  lacks python-dotenv), repo overrides not forwarded (fixed). Round 2:
+  battery settings for laptop (fixed). Next: Swayam pushes, runs
+  `nebius profile create`, creates MysteryBox secret; then dry-run, live
+  run, register task.
 
 - 2026-10-06, Claude, task 10 done (apply_diff gate, before task 6).
   run_agent_loop now fails closed: gated tools are declined when
