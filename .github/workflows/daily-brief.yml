@@ -1,0 +1,52 @@
+name: Daily brief
+
+# Runs `python -m src.copilot.brief` against Nebius Token Factory (Nemotron)
+# every morning. The brief is printed to the log and the run's job summary.
+#
+# Required repo secret:   NEBIUS_API_KEY  (Settings > Secrets and variables > Actions)
+# Optional repo variables: NEBIUS_MODEL, NEBIUS_BASE_URL, BRIEF_TZ
+#
+# Only schedule/manual triggers: no pull_request trigger, so fork PRs can
+# never run this with the secret.
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # 08:00 IST; GitHub may start scheduled runs some minutes late
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write brief
+        shell: bash
+        env:
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+          NEBIUS_MODEL: ${{ vars.NEBIUS_MODEL || 'nvidia/nemotron-3-super-120b-a12b' }}
+          NEBIUS_BASE_URL: ${{ vars.NEBIUS_BASE_URL || 'https://api.tokenfactory.us-central1.nebius.com/v1/' }}
+          BRIEF_TZ: ${{ vars.BRIEF_TZ || 'Asia/Kolkata' }}
+        run: |
+          # Runners use UTC; date the brief in the user's own timezone.
+          BRIEF_DATE="$(TZ="$BRIEF_TZ" date +%F)"
+          export BRIEF_DATE
+          python -m src.copilot.brief | tee -a "$GITHUB_STEP_SUMMARY"

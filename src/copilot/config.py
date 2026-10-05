@@ -18,10 +18,10 @@ MEMORY_DIR = REPO_ROOT / "memory" / "projects"
 class Settings:
     nebius_api_key: str = field(default_factory=lambda: os.getenv("NEBIUS_API_KEY", ""))
     nebius_base_url: str = field(
-        default_factory=lambda: os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com")
+        default_factory=lambda: os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.us-central1.nebius.com/v1/")
     )
     nebius_model: str = field(
-        default_factory=lambda: os.getenv("NEBIUS_MODEL", "nvidia/nemotron-3-super")
+        default_factory=lambda: os.getenv("NEBIUS_MODEL", "nvidia/nemotron-3-super-120b-a12b")
     )
 
     project_repo_paths: dict = field(

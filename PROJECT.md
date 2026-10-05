@@ -15,8 +15,12 @@ Nebius x NVIDIA Global AI Hackathon, Personal AI track.
 - Agent core: NVIDIA Nemotron via Nebius Token Factory (OpenAI-compatible API), tool calling (`src/copilot/llm.py`)
 - Memory: one structured file per project in `memory/projects/` (`src/copilot/memory.py`)
 - Sandbox: OpenShell for shell / simulator / git access
-- Scheduler: Nebius Serverless Job on cron for the daily/weekly brief
-- Demo host: Nebius Serverless Endpoint
+- Scheduler: GitHub Actions cron workflow (`.github/workflows/daily-brief.yml`)
+  runs `python -m src.copilot.brief` against Token Factory; `NEBIUS_API_KEY`
+  lives only in GitHub Actions secrets
+- Demo host: free hosting, platform TBD (task 7)
+- Nebius usage is Token Factory only: no Nebius AI Cloud (Serverless Jobs,
+  Endpoints, MysteryBox)
 - Interface: CLI (`python -m src.copilot.cli`)
 
 ## The 16 skills

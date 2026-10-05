@@ -5,4 +5,3 @@ __pycache__/
 .copilot_pending_diffs.json
 *.vcd
 *.out
-.brief-trigger.log

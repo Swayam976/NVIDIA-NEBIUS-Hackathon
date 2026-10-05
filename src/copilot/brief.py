@@ -2,8 +2,8 @@
 memory and has Nemotron turn it into a short morning brief.
 
 Run locally:  python -m src.copilot.brief
-In the cloud: the Nebius Serverless Job runs this (scripts/brief-job-entry.sh)
-and the brief lands in the job logs.
+Scheduled:    .github/workflows/daily-brief.yml runs this every morning on
+GitHub Actions; the brief lands in the run log and job summary.
 
 Read-only by design: one plain LLM call with no tools attached, so a
 scheduled run can never modify RTL or reach apply_diff.
@@ -30,7 +30,7 @@ only the facts provided; never invent progress, results or blockers.
 
 
 def build_brief(today: str | None = None) -> str:
-    # Cloud VMs run in UTC; the trigger passes the user's local date as BRIEF_DATE.
+    # CI runners use UTC; the workflow passes the user's local date as BRIEF_DATE.
     today = today or os.environ.get("BRIEF_DATE") or _dt.date.today().isoformat()
     rollup = daily_brief()["projects"]
     response = get_client().chat.completions.create(

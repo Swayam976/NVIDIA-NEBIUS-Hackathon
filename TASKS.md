@@ -10,14 +10,27 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 3 | Install iverilog + verilator, confirm testbench_runner / lint_checker work | Claude | done |
 | 4 | Unit tests for memory.py | Codex (codex-work) | todo |
 | 5 | Real modify -> diff -> approve -> apply loop on one small GEMM change | Claude | todo |
-| 6 | Serverless Job (cron) for daily_brief | Claude | in progress (Claude) |
-| 7 | Serverless Endpoint for demo URL | Claude | todo |
+| 6 | GitHub Actions cron for daily_brief via Token Factory (key in Actions secrets) | Claude | in progress (Claude) |
+| 7 | Free demo hosting for demo URL (options proposed, waiting on Swayam's pick) | Claude | todo |
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
 | 10 | apply_diff gate: fail closed with no confirm handler; prompt shows real diff | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 6 replanned per Swayam: no Nebius AI Cloud.
+  Removed the Serverless Job / Task Scheduler / MysteryBox scripts
+  (supersedes the note below). Now .github/workflows/daily-brief.yml runs
+  `python -m src.copilot.brief` at 02:30 UTC (08:00 IST) + manual dispatch;
+  key from secrets.NEBIUS_API_KEY; optional repo vars NEBIUS_MODEL,
+  NEBIUS_BASE_URL, BRIEF_TZ; brief goes to log + job summary; no PR trigger
+  so forks never get the secret. Found: config/.env.example defaults pointed
+  at https://api.tokenfactory.nebius.com (404) and an unverified model ->
+  defaults now the verified us-central1 /v1/ URL and
+  nemotron-3-super-120b-a12b. Verified: actionlint clean; workflow steps
+  simulated in python:3.13 container with only the key set (exit 0).
+  Next: Swayam adds the NEBIUS_API_KEY Actions secret, push, manual run.
 
 - 2026-10-06, Claude, task 6 code committed (still in progress: needs a live
   Nebius run). Nebius Serverless Jobs have no cron (CLI ref, jobs docs,
@@ -79,7 +92,8 @@ Deadline: Oct 30, 2026, 1:00pm EDT
   Codex review: no findings.
 
 - 2026-10-06, Claude, task 1 done. Live Nemotron call via CLI works
-  (NEBIUS_BASE_URL=https://api.tokenfactory.nebius.com,
+  (NEBIUS_BASE_URL=https://api.tokenfactory.us-central1.nebius.com/v1/ - corrected
+  2026-10-06; the unregional URL without /v1 returns 404,
   NEBIUS_MODEL=nvidia/nemotron-3-super-120b-a12b); model called
   project_state_tracker and summarized mxint8-gemm memory. Fixed: CLI crashed
   printing non-cp1252 chars (U+2011) on Windows -> stdout reconfigured to UTF-8.
