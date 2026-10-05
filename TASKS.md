@@ -14,9 +14,26 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 7 | Serverless Endpoint for demo URL | Claude | todo |
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
+| 10 | apply_diff gate: fail closed with no confirm handler; prompt shows real diff | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 10 done (apply_diff gate, before task 6).
+  run_agent_loop now fails closed: gated tools are declined when
+  confirm_tool_call is None or the handler raises (old code applied diffs
+  with no handler - verified by running the new test against it). CLI prompt
+  prints the real diff from the pending store (current file vs proposed),
+  and a "y" records approval bound to a SHA-256 fingerprint of path + shown
+  file + proposed content; apply_diff refuses without a matching approval
+  (also blocks direct calls that skip the loop). Write failure keeps the
+  proposal. New check: python tests/test_apply_gate.py (11 cases).
+  Codex round 1: approval not bound to shown diff (fixed), preview errors
+  crash CLI (fixed). Round 2: write failure lost proposal (fixed).
+  REJECTED round 2 "blocking": file could change in the microseconds between
+  the fingerprint check and write_text - same-call window after a human
+  approved the exact diff; closing it needs OS file locking other editors
+  don't honour on Windows. Residual risk accepted; Swayam to confirm.
 
 - 2026-10-06, Claude, task 3 done. Installed via MSYS2 (ucrt64):
   iverilog 13.0, Verilator 5.050; C:\msys64\ucrt64\bin appended to user PATH

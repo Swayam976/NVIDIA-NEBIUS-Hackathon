@@ -10,6 +10,7 @@ import sys
 from .config import settings
 from .llm import run_agent_loop
 from .tools import TOOL_IMPLS, TOOL_SCHEMAS
+from .tools.module_modifier import approve_pending_diff, preview_pending_diff
 
 
 def confirm_tool_call(name: str, args: dict) -> bool:
@@ -18,8 +19,29 @@ def confirm_tool_call(name: str, args: dict) -> bool:
     for yes" safety behavior actually lives.
     """
     print(f"\n--- The agent wants to call `{name}` with: {args} ---")
+    if name != "apply_diff":
+        answer = input("Allow this action? [y/N] ").strip().lower()
+        return answer == "y"
+
+    # Show the exact diff that would be written, from the pending-diff store
+    # — never rely on the model having shown it.
+    diff_id = str(args.get("diff_id", ""))
+    try:
+        preview = preview_pending_diff(diff_id)
+    except (OSError, ValueError) as exc:  # unreadable file / corrupt store
+        print(f"Could not build a preview of diff {diff_id} ({exc}). Declining.")
+        return False
+    if preview is None:
+        print("No pending diff with that id; nothing to apply. Declining.")
+        return False
+    diff_text, fingerprint = preview
+    print(diff_text)
     answer = input("Apply this change to disk? [y/N] ").strip().lower()
-    return answer == "y"
+    if answer != "y":
+        return False
+    # The approval covers exactly what was shown; apply_diff re-checks it
+    # and refuses if the file or diff changed while this prompt was open.
+    return approve_pending_diff(diff_id, fingerprint)
 
 
 def main() -> None:

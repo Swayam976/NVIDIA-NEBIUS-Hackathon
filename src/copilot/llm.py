@@ -52,7 +52,8 @@ def run_agent_loop(
     confirm_tool_call(name, args) -> bool lets the caller (e.g. the CLI)
     gate sensitive tools like apply_diff behind an explicit yes/no before
     they actually run. If it returns False, the tool is skipped and the
-    model is told the call was declined.
+    model is told the call was declined. If it is None, gated tools are
+    always declined (fail closed) — they never run without a human yes.
 
     Returns (final_text_response, updated_history).
     """
@@ -80,7 +81,14 @@ def run_agent_loop(
             except json.JSONDecodeError:
                 args = {}
 
-            if confirm_tool_call is not None and name in _CONFIRM_REQUIRED and not confirm_tool_call(name, args):
+            if name in _CONFIRM_REQUIRED and confirm_tool_call is None:
+                # Fail closed: a caller with no human in the loop (cron job,
+                # endpoint, script) can never run a gated tool.
+                result = {
+                    "status": "declined",
+                    "message": f"'{name}' needs explicit human approval and no approval prompt is available here.",
+                }
+            elif name in _CONFIRM_REQUIRED and not _confirmed(confirm_tool_call, name, args):
                 result = {"status": "declined", "message": "User did not approve this action."}
             elif name not in tool_impls:
                 result = {"status": "error", "message": f"Unknown tool '{name}'"}
@@ -103,6 +111,14 @@ def run_agent_loop(
         "try breaking the request into smaller steps.",
         messages[1:],
     )
+
+
+def _confirmed(confirm_tool_call: Callable[[str, dict], bool], name: str, args: dict) -> bool:
+    """A confirm handler that crashes counts as a "no", never a "yes"."""
+    try:
+        return bool(confirm_tool_call(name, args))
+    except Exception:  # noqa: BLE001 - fail closed on any handler error
+        return False
 
 
 # Tools that must go through the CLI's confirmation prompt, regardless of
