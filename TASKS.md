@@ -7,7 +7,7 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 |---|------|-------|--------|
 | 1 | Real .env (Nebius key, *_REPO_PATH), one live Nemotron call via CLI | Claude | done |
 | 2 | Update memory/projects/ seed files with real status (ask Swayam) | Claude | done |
-| 3 | Install iverilog + verilator, confirm testbench_runner / lint_checker work | Claude | todo |
+| 3 | Install iverilog + verilator, confirm testbench_runner / lint_checker work | Claude | done |
 | 4 | Unit tests for memory.py | Codex (codex-work) | todo |
 | 5 | Real modify -> diff -> approve -> apply loop on one small GEMM change | Claude | todo |
 | 6 | Serverless Job (cron) for daily_brief | Claude | todo |
@@ -17,6 +17,22 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 3 done. Installed via MSYS2 (ucrt64):
+  iverilog 13.0, Verilator 5.050; C:\msys64\ucrt64\bin appended to user PATH
+  (new terminals only). Fixes: testbench_runner used /tmp (missing on
+  Windows) -> per-call temp dir; lint_checker never found `verilator` on
+  Windows (it's an extensionless Perl script) -> falls back to
+  verilator_bin.exe with VERILATOR_ROOT derived from the install prefix.
+  New check: python tests/test_verification.py (skips if tools missing).
+  Verified on real RTL: ALU.v lint -> 2 WIDTHEXPAND (lines 37-38);
+  ALU_tb.v runs but ctrl=7 vectors fail because the TB golden model shifts
+  by full b (ALU_tb.v:49) while RTL correctly uses b[4:0] -> TB bug, Swayam's
+  repo untouched. Codex round 1: prefer verilator_bin on Windows (fixed,
+  though which() returned None here on Py3.13); round 2: "Exiting due to"
+  filter could hide internal faults -> fixed + nonzero exit never "clean".
+  Limitation for task 5: testbench_runner takes one module file, so
+  multi-file designs (SIMT core) can't run through it yet.
 
 - 2026-10-06, Claude, task 2 done. Per Swayam: dropped custom-isa and
   dsp-fpga; split simt-gpu-core out of riscv-core (renamed from

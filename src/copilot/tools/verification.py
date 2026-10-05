@@ -8,14 +8,46 @@ so the agent can tell the user what to install rather than failing silently.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+
+
+_IS_WINDOWS = os.name == "nt"
+_LINT_SUMMARY_RE = re.compile(r"Exiting due to \d+ (warning|error)\(s\)")
 
 
 def _tool_available(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+def _resolve_verilator() -> tuple[str, dict | None] | None:
+    """Returns (executable, env) for running Verilator, or None.
+
+    On Linux/macOS `verilator` is the normal entry point. On native Windows
+    (MSYS2 ucrt64 build) `verilator` is an extensionless Perl script that
+    can't be exec'd, so fall back to `verilator_bin.exe`. That binary has an
+    MSYS-style VERILATOR_ROOT compiled in, which native Windows can't
+    resolve, so point it at <prefix>/share/verilator unless already set.
+    """
+    exe = shutil.which("verilator")
+    # Depending on PATHEXT, which() on Windows can return the Perl script;
+    # exec'ing that fails with WinError 193, so only accept a real .exe there.
+    if exe is not None and (not _IS_WINDOWS or exe.lower().endswith(".exe")):
+        return exe, None
+
+    exe = shutil.which("verilator_bin")
+    if exe is None:
+        return None
+    env = None
+    if "VERILATOR_ROOT" not in os.environ:
+        root = Path(exe).resolve().parent.parent / "share" / "verilator"
+        if root.is_dir():
+            env = {**os.environ, "VERILATOR_ROOT": str(root)}
+    return exe, env
 
 
 def testbench_runner(module_path: str, tb_path: str, timeout_s: int = 60) -> dict:
@@ -28,13 +60,15 @@ def testbench_runner(module_path: str, tb_path: str, timeout_s: int = 60) -> dic
             "message": "iverilog/vvp not found on PATH. Install Icarus Verilog to enable this skill.",
         }
 
-    out_bin = "/tmp/_copilot_tb.out"
-    compile_cmd = ["iverilog", "-o", out_bin, tb_path, module_path]
-    compile_res = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=timeout_s)
-    if compile_res.returncode != 0:
-        return {"status": "compile_error", "stderr": compile_res.stderr.strip()[-2000:]}
+    # Per-call temp dir: portable (no /tmp on Windows) and safe if two runs overlap.
+    with tempfile.TemporaryDirectory(prefix="copilot_tb_") as tmp:
+        out_bin = str(Path(tmp) / "tb.out")
+        compile_cmd = ["iverilog", "-o", out_bin, tb_path, module_path]
+        compile_res = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=timeout_s)
+        if compile_res.returncode != 0:
+            return {"status": "compile_error", "stderr": compile_res.stderr.strip()[-2000:]}
 
-    run_res = subprocess.run(["vvp", out_bin], capture_output=True, text=True, timeout=timeout_s)
+        run_res = subprocess.run(["vvp", out_bin], capture_output=True, text=True, timeout=timeout_s)
     log = run_res.stdout + run_res.stderr
     passed = bool(re.search(r"\bPASS(ED)?\b", log, re.IGNORECASE)) and not re.search(
         r"\bFAIL(ED)?\b|\bERROR\b", log, re.IGNORECASE
@@ -50,16 +84,27 @@ def lint_checker(file_path: str, timeout_s: int = 30) -> dict:
     """Runs Verilator in lint-only mode and translates warnings into a
     plain list instead of a raw log dump.
     """
-    if not _tool_available("verilator"):
+    resolved = _resolve_verilator()
+    if resolved is None:
         return {"status": "unavailable", "message": "verilator not found on PATH."}
+    exe, env = resolved
 
     res = subprocess.run(
-        ["verilator", "--lint-only", "-Wall", file_path],
+        [exe, "--lint-only", "-Wall", file_path],
         capture_output=True,
         text=True,
         timeout=timeout_s,
+        env=env,
     )
-    warnings = [line.strip() for line in res.stderr.splitlines() if "%Warning" in line or "%Error" in line]
+    # Drop only the trailing "%Error: Exiting due to N warning(s)" summary; it
+    # restates the count. Other "Exiting due to ..." lines (e.g. internal fault) stay.
+    warnings = [
+        line.strip()
+        for line in res.stderr.splitlines()
+        if ("%Warning" in line or "%Error" in line) and not _LINT_SUMMARY_RE.search(line)
+    ]
+    if res.returncode != 0 and not warnings:
+        return {"status": "error", "returncode": res.returncode, "stderr": res.stderr.strip()[-2000:]}
     return {
         "status": "clean" if not warnings else "issues_found",
         "warning_count": len(warnings),
