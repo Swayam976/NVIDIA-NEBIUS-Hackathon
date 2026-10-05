@@ -6,11 +6,10 @@ Nebius x NVIDIA Global AI Hackathon, Personal AI track.
 **Deadline: Oct 30, 2026, 1:00pm EDT.** Scope every change against it.
 
 ## Hardware projects it serves (live, mid-build)
-- RISC-V/SIMT core: 5-stage pipelined RV32I, hazard handling
-- Custom ISA: spec, simulator, Verilog, maybe a compiler
+- RISC-V core: 5-stage pipelined RV32I, hazard handling
+- SIMT GPU core: multi-warp SIMT core grown from the RISC-V pipeline
 - Micro-NPU: DMA engine, systolic array, skewed FIFO, APB wrapper
 - MXINT8 GEMM accelerator: 8x8 output-stationary systolic array, two-level accumulator (extends micro-NPU)
-- DSP-FPGA: FIR filter / FFT core
 
 ## Architecture
 - Agent core: NVIDIA Nemotron via Nebius Token Factory (OpenAI-compatible API), tool calling (`src/copilot/llm.py`)

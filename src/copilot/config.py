@@ -26,11 +26,10 @@ class Settings:
 
     project_repo_paths: dict = field(
         default_factory=lambda: {
-            "riscv-simt-core": os.getenv("RISCV_REPO_PATH", "./repos/riscv-core"),
-            "custom-isa": os.getenv("ISA_REPO_PATH", "./repos/custom-isa"),
+            "riscv-core": os.getenv("RISCV_REPO_PATH", "./repos/riscv-core"),
+            "simt-gpu-core": os.getenv("SIMT_GPU_CORE_PATH", "./repos/simt-gpu-core"),
             "micro-npu": os.getenv("NPU_REPO_PATH", "./repos/micro-npu"),
             "mxint8-gemm": os.getenv("GEMM_REPO_PATH", "./repos/mxint8-gemm"),
-            "dsp-fpga": os.getenv("DSP_REPO_PATH", "./repos/dsp-fpga"),
         }
     )
 

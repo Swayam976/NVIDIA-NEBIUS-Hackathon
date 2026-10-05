@@ -9,11 +9,10 @@ reason about, and — with your explicit approval — edit your Verilog.
 
 ## Projects it tracks
 
-- RISC-V / SIMT core
-- Custom ISA
+- RISC-V core
+- SIMT GPU core
 - Micro-NPU
 - MXINT8 GEMM accelerator
-- DSP-FPGA (FIR / FFT)
 
 Each has a seed file under `memory/projects/`. Edit these to match reality
 before your first run — they're starting points, not fiction.
