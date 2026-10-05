@@ -23,6 +23,11 @@ def confirm_tool_call(name: str, args: dict) -> bool:
 
 
 def main() -> None:
+    # Model output often contains non-ASCII punctuation (e.g. U+2011); on
+    # Windows a redirected stdout defaults to cp1252 and would crash on it.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     problems = settings.validate()
     if problems:
         for p in problems:

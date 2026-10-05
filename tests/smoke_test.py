@@ -3,8 +3,11 @@ holds together before relying on it. Mocks the Nebius client so it runs
 with no network access and no API key.
 """
 
+import atexit
 import os
+import shutil
 import sys
+import tempfile
 import types
 from pathlib import Path
 from unittest import mock
@@ -14,6 +17,15 @@ os.environ.setdefault("NEBIUS_API_KEY", "test-key-not-real")
 
 from src.copilot import memory  # noqa: E402
 from src.copilot.tools import TOOL_IMPLS, TOOL_SCHEMAS  # noqa: E402
+
+# Run against a throwaway copy of memory/projects/ so the write round-trips
+# below never touch the real project files. atexit also fires on a failed
+# assert, so the copy is cleaned up either way.
+_tmp_root = Path(tempfile.mkdtemp(prefix="copilot_smoke_"))
+atexit.register(shutil.rmtree, _tmp_root, ignore_errors=True)
+_tmp_memory = _tmp_root / "projects"
+shutil.copytree(memory.MEMORY_DIR, _tmp_memory)
+memory.MEMORY_DIR = _tmp_memory
 
 print(f"Loaded {len(TOOL_SCHEMAS)} tool schemas, {len(TOOL_IMPLS)} implementations.")
 assert len(TOOL_SCHEMAS) == 16, f"expected 16 skills, found {len(TOOL_SCHEMAS)}"
