@@ -15,9 +15,24 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
 | 10 | apply_diff gate: fail closed with no confirm handler; prompt shows real diff | Claude | done |
+| 11 | Live audit of all 16 skills via CLI (RISC-V files), report + ranked fixes | Claude | in review (fixes await Swayam's go-ahead) |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 11 audit (14 real CLI sessions, Nemotron via
+  Token Factory, RISC-V files; memory/pending store on temp copies; NPU N/A,
+  not local). Works: project_state_tracker, decision_log, lint_checker,
+  modify_module, apply_diff (gate declined, ALU.v untouched),
+  next_step_suggester, daily_brief. Weak: testbench_runner (cut-off log
+  tail, no counts -> model blamed the ALU), spec_drafting_assistant
+  (invented signal names), cross_project_linker (junk tokens). Fails:
+  hazard_sanity_checker (missed removed EX/MEM forwarding priority),
+  waveform_summarizer (vcdvcd missing), commit_to_summary +
+  regression_spotter (non-git dir reported as "no commits/changes"),
+  changelog_generator (clear error; no git repos exist). Not run:
+  isa_spec_cross_referencer (no ISA spec anywhere). Side finding for
+  Swayam: ALU_tb golden model shifts by full b for SLL/SRL/SRA (ctrl 5-7).
 
 - 2026-10-06, task 6 done: manual run 37424187039 on a18e5e1 succeeded
   (confirmed via GitHub API), brief in the run summary. Scheduled daily at
