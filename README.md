@@ -73,6 +73,8 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 
 ## Web demo
 
+Live: https://nvidia-nebius-hackathon-kesr7gfcpbu3lgqhnuefra.streamlit.app/ (password-protected; ask the author for access)
+
 `demo/streamlit_app.py` is a password-protected web UI, deployed on Streamlit
 Community Cloud (main file `demo/streamlit_app.py`; `packages.txt` installs
 iverilog + Verilator). Set these app secrets:

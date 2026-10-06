@@ -11,13 +11,19 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 4 | Unit tests for memory.py | Codex (codex-work) | todo |
 | 5 | Real modify -> diff -> approve -> apply loop on one small GEMM change | Claude | todo |
 | 6 | GitHub Actions cron for daily_brief via Token Factory (key in Actions secrets) | Claude | in progress (Claude) |
-| 7 | Free demo hosting on Streamlit Community Cloud (sample RTL, password + request cap) | Claude | in progress (Claude) |
+| 7 | Free demo hosting on Streamlit Community Cloud (sample RTL, password + request cap) | Claude | in review (Swayam: verify chat flow) |
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
 | 10 | apply_diff gate: fail closed with no confirm handler; prompt shows real diff | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 7 deployed by Swayam: https://nvidia-nebius-hackathon-kesr7gfcpbu3lgqhnuefra.streamlit.app/
+  Public sharing on; anonymous request -> Streamlit Cloud cookie handshake
+  -> HTTP 200 app shell (checked with curl). App logic not verifiable
+  without a browser + DEMO_PASSWORD: Swayam to run the ALU flow (testbench
+  fails -> fix -> Approve -> passes), then tick "Working demo URL".
 
 - 2026-10-06, Claude, task 7 code committed (in progress until deployed).
   Per Swayam: HF Spaces now needs PRO for Gradio (free = ZeroGPU only, 30d+
