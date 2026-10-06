@@ -20,9 +20,37 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 13 | Audit fixes 5-7: waveform_summarizer dependency, cross_project_linker noise, isa_spec_cross_referencer RV32I mode | Claude | done |
 | 14 | testbench_runner multi-file designs + program files; spec_drafting_assistant flags names not in the RTL | Claude | done |
 | 15 | New skill: debug_failing_test (run tb, locate first mismatch in VCD, root cause, fix as pending diff) | Claude | done |
+| 16 | New skill: testbench_auditor (expected-value model vs RTL/spec, report only) | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 16 done: testbench_auditor (tools/debugging.py),
+  18 skills now. Report only: never writes; fixes go through modify_module
+  -> apply_diff (gate unchanged) if Swayam asks. Picks the RTL the testbench
+  instantiates via design_files (module_path or rtl_dir), optional spec.
+  Extracts every expected-value computation (expected/exp/golden/ref/model...
+  assignments; strings and comments blanked; multi-line and several per line
+  handled; case label from the same or the preceding line) and numbers them
+  E1..En. A deterministic rule flags shift amounts that differ from the RTL
+  arm with the SAME case label (tb full `b` vs RTL `b[4:0]`); no label or
+  ambiguous RTL -> no rule finding. One reasoning call (thinking=True, 16k,
+  one retry without reasoning) reviews all computations against the
+  line-numbered RTL/spec; replies keyed by E-id (tb_line only if the line has
+  a single computation), rtl_ref checked against files shown, severity
+  sanitised; rule findings the model agrees with get confirmed_by_model.
+  Model outage keeps rule findings. Truncated/omitted sources -> coverage
+  "partial" in the report. Live on the real RISC-V ALU (direct + CLI):
+  "3 mismatch(es) in 11 expected-value computation(s)", ALU_tb.v:47/48/49 ->
+  ALU.v:34/35/36, all confirmed by the model, ~6-8 s, files unchanged.
+  Regression fixture: tests/fixtures/riscv_alu/ (copies of the real buggy
+  ALU_tb.v and ALU.v). Codex round 1: borrowed RTL case, multi-line/same-line
+  assignments, block comments (fixed); round 2: label on the preceding line +
+  all RTL shifts tracked, per-computation ids, partial-coverage report
+  (fixed). 2 rounds used. New check: tests/test_auditor.py.
+  Self-found after review: the web sandbox let spec_path "rv32i" through
+  unconfined for every tool; now only isa_spec_cross_referencer gets that
+  keyword (auditor resolves it inside the workspace; test_sandbox covers it).
 
 - 2026-10-06, Claude, task 15 done: debug_failing_test (tools/debugging.py),
   17 skills now. Reuses testbench_runner (new internal vcd_out: compiles in

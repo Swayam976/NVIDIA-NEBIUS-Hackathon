@@ -40,8 +40,8 @@ try:
     schemas, impls = sandbox.guarded_tools(ws)
     names = {s["function"]["name"] for s in schemas}
     assert "apply_diff" not in names and "apply_diff" not in impls, "model must never get apply_diff in the demo"
-    assert len(names) == 16
-    print("guarded_tools: apply_diff withheld from the model, 16 tools offered: OK")
+    assert len(names) == 17
+    print("guarded_tools: apply_diff withheld from the model, 17 tools offered: OK")
 
     # --- guarded tool calls ---
     (outside / "secret.v").write_text("module s; endmodule\n", encoding="utf-8")
@@ -73,6 +73,20 @@ try:
         assert r["status"] == "ok" and r["mode"] == "rv32i" and len(r["unclear"]) == 40, r
     r = impls["isa_spec_cross_referencer"](rtl_dir="rtl", spec_path="../../etc/passwd")
     assert r["status"] == "error" and "outside" in r["message"], r
+    # Only the cross-referencer treats "rv32i" as a keyword; for the auditor it
+    # is a path and must stay inside the workspace (not the server's cwd).
+    seen = {}
+    real = sandbox.TOOL_IMPLS["testbench_auditor"]
+    sandbox.TOOL_IMPLS["testbench_auditor"] = lambda **kw: seen.update(kw) or {"status": "ok"}
+    try:
+        _, impls_a = sandbox.guarded_tools(ws)
+        impls_a["testbench_auditor"](tb_path="rtl/alu_tb.v", rtl_dir="rtl", spec_path="rv32i")
+        assert Path(seen["spec_path"]) == ws.root.resolve() / "rv32i", seen
+        seen.clear()
+        impls_a["testbench_auditor"](tb_path="rtl/alu_tb.v", rtl_dir="rtl", spec_path="")
+        assert seen["spec_path"] == "", seen
+    finally:
+        sandbox.TOOL_IMPLS["testbench_auditor"] = real
     print("guarded isa_spec_cross_referencer: RV32I mode in the workspace, spec paths still confined: OK")
 
     # Smuggled kwargs (not in the tool schema) are dropped, not passed through.
