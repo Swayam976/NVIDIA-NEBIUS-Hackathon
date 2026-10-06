@@ -24,17 +24,18 @@ def get_client() -> OpenAI:
     return _client
 
 
-def json_completion(client, messages: list[dict], max_tokens: int = 4000) -> str:
+def json_completion(client, messages: list[dict], max_tokens: int = 4000, thinking: bool = False) -> str:
     """One JSON-object completion for a structured check (a tool's own model
-    call, not the agent loop). Reasoning is switched off: Nemotron otherwise
-    can spend the whole output budget thinking and return no content
-    (finish_reason=length). Raises if the output was cut off."""
+    call, not the agent loop). Reasoning is off by default: Nemotron can
+    otherwise spend the whole output budget thinking and return no content
+    (finish_reason=length). thinking=True keeps it on for genuine reasoning
+    tasks; give it a large max_tokens. Raises if the output was cut off."""
     response = client.chat.completions.create(
         model=settings.nebius_model,
         messages=messages,
         response_format={"type": "json_object"},
         max_tokens=max_tokens,
-        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        extra_body={"chat_template_kwargs": {"enable_thinking": thinking}},
     )
     choice = response.choices[0]
     if getattr(choice, "finish_reason", None) == "length":

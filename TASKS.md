@@ -19,9 +19,31 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 12 | Audit fixes 1-4: testbench summary, hazard checker, grounded spec drafts, git-skill errors + mtime fallback | Claude | done |
 | 13 | Audit fixes 5-7: waveform_summarizer dependency, cross_project_linker noise, isa_spec_cross_referencer RV32I mode | Claude | done |
 | 14 | testbench_runner multi-file designs + program files; spec_drafting_assistant flags names not in the RTL | Claude | done |
+| 15 | New skill: debug_failing_test (run tb, locate first mismatch in VCD, root cause, fix as pending diff) | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 15 done: debug_failing_test (tools/debugging.py),
+  17 skills now. Reuses testbench_runner (new internal vcd_out: compiles in
+  one generated $dumpvars module, user files untouched), waveform_summarizer
+  (window around the first failure) and modify_module (fix = pending diff;
+  only apply_diff, behind the gate, writes). One reasoning call
+  (json_completion thinking=True, 16k budget) + one retry without reasoning
+  if cut off; modify_module adds its usual edit call. Locates the earliest
+  failing line in the VCD by matching every logged name=value (radix read
+  from the testbench's own $display formats; ambiguous radix, x/z values,
+  missing or tied signals -> no location claimed, reason given). Passing or
+  not-runnable tests stop before any model call. Live on the real RISC-V
+  ALU (CLI + direct, 4 runs): root cause ALU_tb.v:47, high confidence,
+  "expected shifts by full b; RTL correctly uses b[4:0]", failure at
+  1,000,000 ps, one-hunk 3-line diff; agent asked before applying; files
+  unchanged. Also: modify_module now undoes whitespace-only/blank-line edits
+  it wasn't asked for (token-aware, string contents kept) - it had dropped
+  an unrelated blank line in the live diff. Codex round 1: string spaces in
+  the whitespace guard, earliest failure, %h/%b radix (fixed); round 2:
+  conflicting radixes, tied signals (fixed). 2 rounds used.
+  New check: tests/test_debugging.py.
 
 - 2026-10-06, Claude, task 14 done. testbench_runner: rtl_dir (or module_path)
   -> compiles only modules the testbench instantiates (rtl_files.design_files),

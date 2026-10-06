@@ -116,6 +116,7 @@ _DATA_EXTS = (".mem", ".hex", ".dat")
 _DATA_MAX_FILES = 300
 _DATA_MAX_BYTES = 50 * 1024 * 1024
 _DATA_SCAN_LIMIT = 20000  # files visited per search root
+_VCD_MAX_BYTES = 100 * 1024 * 1024  # waveform dumps kept for debugging
 
 
 def _safe_data_root(d: Path) -> bool:
@@ -196,6 +197,7 @@ def testbench_runner(
     rtl_dir: str = "",
     timeout_s: int = 60,
     compile_check: Callable[[list[Path]], str | None] | None = None,
+    vcd_out: Path | None = None,
 ) -> dict:
     """Compiles and runs a Verilog testbench with Icarus Verilog and returns
     pass/fail plus a short summary instead of the raw simulator log.
@@ -210,6 +212,11 @@ def testbench_runner(
     exact compiler inputs, in order, before every compile attempt; a non-None
     reason aborts with status "blocked". The web demo uses it for its safety
     check, since `ifdef outcomes depend on file order.
+
+    vcd_out (internal, not in the tool schema): also dump a waveform of the
+    whole testbench hierarchy, by compiling in one generated module (the
+    user's files are untouched), and copy it to vcd_out. The result then
+    carries "vcd_path" and "_compiled_paths" (absolute source paths).
     """
     if not _tool_available("iverilog") or not _tool_available("vvp"):
         return {
@@ -264,6 +271,16 @@ def testbench_runner(
                       *_vivado_mem_init_dirs(tb.parent)]
         staged, data_conflicts = _stage_data_files(data_roots, run_dir)
         out_bin = run_dir / "tb.out"
+        dump_args: list[str] = []
+        if vcd_out is not None:
+            # Generated, fixed content (tops[0] is a parsed identifier), so it is
+            # not part of compile_check's input; it only adds a VCD dump.
+            dump_src = run_dir / "copilot_vcd_dump.v"
+            dump_src.write_text(
+                "module copilot_vcd_dump;\n"
+                f'  initial begin $dumpfile("copilot_dump.vcd"); $dumpvars(0, {tops[0]}); end\n'
+                "endmodule\n", encoding="utf-8")
+            dump_args = [str(dump_src)]  # its "-s" root goes with the options below
         for _ in range(6):  # compile; add files for modules iverilog reports as unknown
             include_dirs = list(dict.fromkeys([tb.parent, *(f.parent for f in files)]))  # incl. files added by retries
             if compile_check is not None and (reason := compile_check(list(files))):
@@ -271,8 +288,9 @@ def testbench_runner(
             # SystemVerilog mode only when SV sources are compiled: it reserves
             # words (logic, bit, int...) that plain Verilog designs may use as names.
             sv = ["-g2012"] if any(f.suffix.lower() in (".sv", ".svh") for f in files) else []
-            cmd = ["iverilog", *sv, *[a for t in tops for a in ("-s", t)], *[f"-I{d}" for d in include_dirs],
-                   "-o", str(out_bin), *map(str, files)]
+            roots = [*tops, *(["copilot_vcd_dump"] if dump_args else [])]
+            cmd = ["iverilog", *sv, *[a for t in roots for a in ("-s", t)], *[f"-I{d}" for d in include_dirs],
+                   "-o", str(out_bin), *map(str, files), *dump_args]
             try:
                 compiled = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=tmp)
             except subprocess.TimeoutExpired:
@@ -307,6 +325,16 @@ def testbench_runner(
             log = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
             timed_out, exit_code = True, None
 
+        vcd_copied = False
+        if vcd_out is not None:
+            # Our dump, or failing that the testbench's own (largest .vcd), if not huge.
+            dumps = [run_dir / "copilot_dump.vcd"] + sorted(run_dir.glob("*.vcd"), key=lambda p: -p.stat().st_size)
+            for dump in dumps:
+                if dump.is_file() and 0 < dump.stat().st_size <= _VCD_MAX_BYTES:
+                    shutil.copy2(dump, vcd_out)
+                    vcd_copied = True
+                    break
+
     summary = _summarize_log(log)
     # Same line classification as the counts, so status and counts never
     # disagree; a non-zero simulator exit ($fatal, crash) is never a pass.
@@ -339,6 +367,9 @@ def testbench_runner(
         "data_files": sorted(staged)[:40],
         "note": "Pass/fail is inferred from PASS/FAIL text in the log — make sure your testbench prints one.",
     }
+    if vcd_out is not None:
+        result["vcd_path"] = str(vcd_out) if vcd_copied else None
+        result["_compiled_paths"] = [str(f) for f in files]
     if data_conflicts:
         # Several different files share a name; the one closest to the testbench was used.
         data_bases = [tb.parent.parent, *bases]  # so two "prog.mem" paths stay distinguishable

@@ -12,6 +12,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 import uuid
 from pathlib import Path
 
@@ -43,6 +44,46 @@ and explain why in "explanation".
 """
 
 
+_WHITESPACE_ASK_RE = re.compile(r"whitespace|blank line|indent|format|tidy|clean ?up|style", re.IGNORECASE)
+
+
+def _keep_original_whitespace(original: str, new: str) -> str:
+    """Undoes edits that only add/remove blank lines or change whitespace.
+    The model regenerates the whole file and tends to tidy lines it was not
+    asked to touch, which buries the real change in diff noise. Hunks with
+    any real (non-whitespace) change are kept exactly as proposed."""
+    a, b = original.splitlines(keepends=True), new.splitlines(keepends=True)
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        old_seg, new_seg = a[i1:i2], b[j1:j2]
+        if tag != "equal" and [_tokens(l) for l in old_seg if l.strip()] == [_tokens(l) for l in new_seg if l.strip()]:
+            out.extend(old_seg)  # the whole hunk is whitespace-only
+        elif tag == "replace" and (
+            len([l for l in old_seg if l.strip()]) == len(new_nonblank := [l for l in new_seg if l.strip()])
+        ):
+            # Same number of non-blank lines: keep the original layout (its blank
+            # lines) and take the new text only where a line really changed.
+            fresh = iter(new_nonblank)
+            for o in old_seg:
+                if o.strip():
+                    n = next(fresh)
+                    out.append(o if _tokens(o) == _tokens(n) else n)
+                else:
+                    out.append(o)
+        else:
+            out.extend(new_seg)  # real insertions/deletions: take the proposal as is
+    return "".join(out)
+
+
+# A token = a run of non-space characters and/or whole string literals, so
+# spaces INSIDE a string ("a  b" vs "a b") are a real difference.
+_TOKEN_RE = re.compile(r'(?:"(?:\\.|[^"\\\n])*"?|[^\s"])+')
+
+
+def _tokens(line: str) -> list[str]:
+    return _TOKEN_RE.findall(line)
+
+
 def modify_module(module_path: str, instruction: str) -> dict:
     """Generates a proposed edit to a Verilog module as a reviewable diff.
     Does NOT write to disk — call apply_diff with the returned diff_id to
@@ -72,6 +113,10 @@ def modify_module(module_path: str, instruction: str) -> dict:
         explanation = payload.get("explanation", "")
     except (json.JSONDecodeError, KeyError) as exc:
         return {"status": "error", "message": f"Model did not return valid edit JSON: {exc}"}
+    if not isinstance(new_content, str):
+        return {"status": "error", "message": "Model did not return the new file content as text."}
+    if not _WHITESPACE_ASK_RE.search(instruction):
+        new_content = _keep_original_whitespace(original, new_content)
 
     diff_lines = list(
         difflib.unified_diff(

@@ -40,8 +40,8 @@ try:
     schemas, impls = sandbox.guarded_tools(ws)
     names = {s["function"]["name"] for s in schemas}
     assert "apply_diff" not in names and "apply_diff" not in impls, "model must never get apply_diff in the demo"
-    assert len(names) == 15
-    print("guarded_tools: apply_diff withheld from the model, 15 tools offered: OK")
+    assert len(names) == 16
+    print("guarded_tools: apply_diff withheld from the model, 16 tools offered: OK")
 
     # --- guarded tool calls ---
     (outside / "secret.v").write_text("module s; endmodule\n", encoding="utf-8")
@@ -158,6 +158,9 @@ try:
         for kwargs in ({"tb_path": "rtl/alu_tb.v", "rtl_dir": "rtl"}, {"tb_path": "rtl/alu_tb.v", "module_path": "rtl/alu.v"}):
             r = impls["testbench_runner"](**kwargs)
             assert r["status"] == "blocked", (kwargs, r)
+            # debug_failing_test simulates too: same guard, stopped before any model call.
+            r = impls["debug_failing_test"](**kwargs)
+            assert r["status"] == "not_debuggable" and r["testbench_status"] == "blocked" or r["status"] == "blocked", (kwargs, r)
         shutil.rmtree(rtl / "deep")
         print("guarded testbench_runner: rtl_dir works in the workspace; an unsafe file anywhere blocks it: OK")
 finally:
