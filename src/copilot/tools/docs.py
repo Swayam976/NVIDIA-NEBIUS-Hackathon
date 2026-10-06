@@ -12,7 +12,7 @@ from pathlib import Path
 from .. import memory
 from ..config import settings
 from ..llm import get_client, json_completion
-from .rtl_files import HDL_EXTS, is_testbench, module_interfaces, project_files
+from .rtl_files import HDL_EXTS, instance_connections, is_testbench, module_interfaces, project_files, project_identifiers
 
 # Matches mnemonic-looking tokens: e.g. ADD, ADDI, LW, custom.foo
 _MNEMONIC_RE = re.compile(r"\b[A-Z][A-Z0-9_.]{1,15}\b")
@@ -228,19 +228,24 @@ def isa_spec_cross_referencer(rtl_dir: str, spec_path: str = "") -> dict:
 
 def spec_drafting_assistant(project: str, section_hint: str) -> dict:
     """Drafts spec/README text for a project section, grounded in that
-    project's status from memory and the real module interfaces from its
-    RTL (so signal names come from the code, not the model's imagination).
+    project's status from memory, the real module interfaces from its RTL and
+    the instance connections between modules. Afterwards every module/signal
+    name the draft uses is checked against the RTL; names that don't exist
+    there are returned as unverified_names.
     """
     status = memory.get_status(project)
     repo = settings.project_repo_paths.get(project)
-    interfaces, modules = ("", [])
-    if repo and Path(repo).is_dir():
-        interfaces, modules = module_interfaces(Path(repo), hint=section_hint)
-    rtl_block = (
-        f"RTL module interfaces (from the project's source files):\n{interfaces}"
-        if interfaces
-        else "No RTL source is available for this project, so do not name any modules or signals."
-    )
+    root = Path(repo) if repo and Path(repo).is_dir() else None
+    interfaces, modules, wiring, wiring_lines = "", [], "", 0
+    if root:
+        interfaces, modules = module_interfaces(root, hint=section_hint)
+        wiring, wiring_lines = instance_connections(root, hint=section_hint)
+    if interfaces:
+        rtl_block = f"RTL module interfaces (from the project's source files):\n{interfaces}"
+        if wiring:
+            rtl_block += f"\n\nRTL instance connections (parent: module instance (.port(signal), ...)):\n{wiring}"
+    else:
+        rtl_block = "No RTL source is available for this project, so do not name any modules or signals."
     client = get_client()
     response = client.chat.completions.create(
         model=settings.nebius_model,
@@ -249,8 +254,9 @@ def spec_drafting_assistant(project: str, section_hint: str) -> dict:
                 "role": "system",
                 "content": "You draft concise, technically precise hardware design spec/README sections. "
                 "Match the terse, factual tone of an engineer's own notes, not marketing copy. "
-                "Name only modules and signals that appear in the RTL interface list you are given. "
-                "If a detail is not supported by the status or the RTL list, write 'TBD' instead of inventing it.",
+                "Name only modules and signals that appear in the RTL you are given, and describe connections "
+                "between modules only as the instance connections show them. Put module and signal names in "
+                "backticks. If a detail is not supported by the status or the RTL, write 'TBD' instead of inventing it.",
             },
             {
                 "role": "user",
@@ -259,14 +265,66 @@ def spec_drafting_assistant(project: str, section_hint: str) -> dict:
             },
         ],
     )
+    draft = response.choices[0].message.content or ""
+    if not draft.strip():
+        return {"status": "error", "message": "The model returned no draft text (output cut off); try again."}
+
+    names = _draft_names(draft)  # every name is checked; only the display is capped
+    if root and modules:
+        known = project_identifiers(root)  # case-sensitive, like Verilog
+        unverified = [n for n in names if n not in known]
+        shown = ", ".join(unverified[:25]) + (f" (+{len(unverified) - 25} more)" if len(unverified) > 25 else "")
+        note = (
+            f"These names in the draft don't appear in the project's RTL (case-sensitive): {shown}. "
+            "Correct them or mark them TBD before using the draft."
+            if unverified
+            else f"All {len(names)} module/signal names in the draft exist in the RTL; still check anything marked TBD."
+        )
+    else:
+        unverified = names
+        shown = ", ".join(names[:25]) + (f" (+{len(names) - 25} more)" if len(names) > 25 else "")
+        note = "No RTL found for this project; draft is based on the memory status only" + (
+            f", and its names could not be checked: {shown}." if names else "."
+        )
     return {
         "status": "ok",
-        "draft": response.choices[0].message.content or "",
+        "draft": draft,
         "grounded_on_modules": modules,
-        "note": "Signal names should come from the listed RTL modules; check anything marked TBD."
-        if modules
-        else "No RTL found for this project; draft is based on the memory status only.",
+        "wiring_lines_given": wiring_lines,
+        "names_checked": len(names),
+        "unverified_names": unverified[:25],
+        "unverified_count": len(unverified),
+        "note": note,
     }
+
+
+_VERILOG_WORDS = frozenset(
+    """always and assign begin buf case casex casez default defparam disable else end endcase endfunction
+    endgenerate endmodule endtask event for force forever function generate genvar if initial inout input
+    integer localparam logic module nand negedge nor not or output parameter posedge real realtime reg
+    release repeat signed supply0 supply1 task time tri unsigned wand while wire wor xor""".split()
+)
+_CODE_SPAN_RE = re.compile(r"`([^`\n]+)`")
+_SIZED_LITERAL_RE = re.compile(r"\d*\s*'\s*[sS]?[bBoOdDhH]\s*[0-9a-fA-FxXzZ_?]+")
+_SNAKE_RE = re.compile(r"(?<![\w.])[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?![\w])")
+
+
+def _draft_names(draft: str) -> list[str]:
+    """Identifier-like names a draft uses: everything inside `code spans`
+    (sized literals and file extensions stripped) plus snake_case words in
+    the prose. Verilog keywords and TBD are ignored; single-letter names
+    (`a`, `q`) are checked too, since file extensions and sized literals are
+    stripped before splitting."""
+    names: set[str] = set()
+    for span in _CODE_SPAN_RE.findall(draft):
+        span = _SIZED_LITERAL_RE.sub(" ", span)
+        span = re.sub(r"\.(?:s?v|vh|svh|xpr|mem|hex)\b", " ", span)
+        names.update(re.findall(r"[A-Za-z_]\w*", span))
+    names.update(_SNAKE_RE.findall(_CODE_SPAN_RE.sub(" ", draft)))
+    return sorted(
+        n for n in names
+        if n.lower() not in _VERILOG_WORDS and n.lower() not in ("tbd", "todo")
+    )
 
 
 def changelog_generator(repo_path: str, since: str = "1.week") -> dict:

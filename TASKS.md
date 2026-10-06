@@ -18,9 +18,35 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 11 | Live audit of all 16 skills via CLI (RISC-V files), report + ranked fixes | Claude | done |
 | 12 | Audit fixes 1-4: testbench summary, hazard checker, grounded spec drafts, git-skill errors + mtime fallback | Claude | done |
 | 13 | Audit fixes 5-7: waveform_summarizer dependency, cross_project_linker noise, isa_spec_cross_referencer RV32I mode | Claude | done |
+| 14 | testbench_runner multi-file designs + program files; spec_drafting_assistant flags names not in the RTL | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 14 done. testbench_runner: rtl_dir (or module_path)
+  -> compiles only modules the testbench instantiates (rtl_files.design_files),
+  stages .mem/.hex/.dat program files (tb folder first, then its parent, then
+  Vivado's mem_init_files) into the run dir, -g2012 only for .sv, retries
+  with files for modules iverilog reports unknown, never guesses between
+  duplicate definitions, reports missing program files (missing_data_file),
+  timeouts, $fatal/non-zero exit, and same-named program files with
+  different contents. spec_drafting_assistant: prompt also carries instance
+  connections; every name in the draft is checked (case-sensitive, strings
+  excluded) and unknown ones returned as unverified_names. Web sandbox:
+  every HDL file in the workspace is checked, plus the exact compiler inputs
+  in compile order before each attempt (compile_check hook, not in schema);
+  raw-text system-task scan + no $`MACRO names. Verified on real designs:
+  RISC-V pipelined_cpu_top_tb PASS (26 checks, 17 files); SIMT 13/19 pass.
+  Findings for Swayam (project/testbench issues, not RTL, Vivado would hit
+  them too): global.mem, pop.mem, relaunch.mem, idle.mem don't exist
+  anywhere; simt_grid_tb never passes PROGRAM to the core (runs a stale
+  program.hex); simt_replay_tb passes PROGRAM as a port, not a parameter.
+  Codex: 3 rounds as authorized, 10 findings, all fixed (round 1: ifdef
+  order bypass in the sandbox [blocking], retry ambiguity, case/strings in
+  name check, 25-name cut; round 2: include dirs on retry, strings in the
+  dependency walk, single-letter names; round 3: same-named program files,
+  -g2012 for .sv, exit code). Round-3 fixes are unreviewed (no round left).
+  New check: tests/test_multifile.py. All suites pass locally + Debian 11.
 
 - 2026-10-06, Claude, task 13 done (audit fixes 5-7). waveform_summarizer:
   built-in streaming VCD reader (tools/vcd.py, stdlib only) instead of

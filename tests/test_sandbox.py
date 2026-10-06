@@ -122,6 +122,11 @@ try:
             "quoted // + include": f'module t; initial $display("//"); endmodule\n`include "{sec}"\n',
             # A macro named after a directive must not re-enable it (Codex review).
             "define include": f'`define include 1\n`include "{sec}"\nmodule t; endmodule\n',
+            # Order-dependent `ifdef: hidden from a check that sees the `define
+            # first, live when compiled in another order (Codex review, task 14).
+            "ifdef-hidden": '`define SAFE\nmodule t; integer f; initial begin\n`ifdef SAFE\n$display("ok");\n'
+                            '`else\nf = $fopen("/etc/passwd", "r");\n`endif\nend endmodule\n',
+            "macro task name": '`define T fopen\nmodule t; integer f; initial f = $`T("x", "r"); endmodule\n',
         }
         for label, src in attacks.items():
             f = rtl / "attack.v"
@@ -142,6 +147,19 @@ try:
         r = impls["testbench_runner"](module_path="rtl/alu.v", tb_path="rtl/evil_tb.v")
         assert r["status"] == "blocked", r
         print("guarded testbench_runner: sample runs (XOR FAIL), $fopen testbench blocked: OK")
+
+        # rtl_dir lets the runner compile more than the named files, so ANY
+        # unsafe HDL file in the workspace blocks the run, not just named ones.
+        (rtl / "evil_tb.v").unlink()
+        r = impls["testbench_runner"](tb_path="rtl/alu_tb.v", rtl_dir="rtl")
+        assert r["status"] == "fail_or_unknown" and "alu.v" in r["compiled_files"], r
+        (rtl / "deep").mkdir()
+        (rtl / "deep" / "helper.v").write_text(attacks["readmemh"], encoding="utf-8")
+        for kwargs in ({"tb_path": "rtl/alu_tb.v", "rtl_dir": "rtl"}, {"tb_path": "rtl/alu_tb.v", "module_path": "rtl/alu.v"}):
+            r = impls["testbench_runner"](**kwargs)
+            assert r["status"] == "blocked", (kwargs, r)
+        shutil.rmtree(rtl / "deep")
+        print("guarded testbench_runner: rtl_dir works in the workspace; an unsafe file anywhere blocks it: OK")
 finally:
     shutil.rmtree(ws.root, ignore_errors=True)
     shutil.rmtree(outside, ignore_errors=True)

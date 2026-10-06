@@ -57,14 +57,14 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 | `project_state_tracker` | Reports current status/blockers for a project |
 | `decision_log` | Appends a design decision + rationale |
 | `cross_project_linker` | Surfaces related context across projects |
-| `testbench_runner` | Runs a Verilog testbench (iverilog/vvp) |
+| `testbench_runner` | Runs a Verilog testbench (iverilog/vvp) on single- or multi-file designs, staging program files as Vivado does |
 | `lint_checker` | Runs Verilator lint on a module |
 | `hazard_sanity_checker` | Heuristic scan of a diff for hazard red flags |
 | `waveform_summarizer` | Summarizes a VCD dump around a signal/time range |
 | `modify_module` | Generates a diff for a requested RTL change (review only) |
 | `apply_diff` | Writes a previously generated diff to disk — **asks for confirmation** |
 | `isa_spec_cross_referencer` | Checks which RV32I instructions the RTL implements (or diffs a spec file's mnemonics against it) |
-| `spec_drafting_assistant` | Drafts spec/README text from current project state |
+| `spec_drafting_assistant` | Drafts spec/README text from project state + real RTL interfaces and wiring; flags names not in the RTL |
 | `changelog_generator` | Turns git history into a readable changelog |
 | `commit_to_summary` | "What did I do this week" from git log |
 | `regression_spotter` | Flags commits touching modules with existing tests |

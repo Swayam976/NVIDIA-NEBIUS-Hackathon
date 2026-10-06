@@ -184,6 +184,14 @@ def check_hdl_sources(paths: list[Path], timeout_s: int = 20) -> str | None:
     for name in _DIRECTIVE_RE.findall(raw):
         if name not in _ALLOWED_DIRECTIVES and name not in defined:
             return f"Compiler directive `{name} isn't allowed in the demo (no `include or file access)."
+    # Order-independent: a system task in the raw text is refused even inside
+    # an `ifdef branch that this check's file order happens to disable, and a
+    # task name can't be assembled from a macro ($`NAME).
+    if re.search(r"\$\s*`", raw):
+        return "System task names built from macros aren't allowed in the demo."
+    for task in _SYSTASK_RE.findall(raw):
+        if task not in ALLOWED_SYSTEM_TASKS:
+            return f"System task ${task} isn't allowed in the demo (no file or process access)."
 
     if shutil.which("iverilog") is None:
         return "iverilog is not installed, so sources can't be safety-checked."
@@ -206,7 +214,7 @@ def check_hdl_sources(paths: list[Path], timeout_s: int = 20) -> str | None:
 
 _PATH_ARGS = {"module_path", "tb_path", "file_path", "vcd_path", "spec_path", "rtl_dir", "repo_path"}
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-_HDL_CHECKED = {"testbench_runner": ("module_path", "tb_path"), "lint_checker": ("file_path",)}
+_HDL_CHECKED = {"lint_checker": ("file_path",)}  # testbench_runner: whole workspace, see below
 # Never offered to the model in the demo; applying happens only via the
 # approval panel (approve_pending_diff + apply_diff on a human click).
 _WEB_EXCLUDED = {"apply_diff"}
@@ -243,7 +251,17 @@ def guarded_tools(ws: Workspace) -> tuple[list[dict], dict[str, Callable[..., di
                 for p in kwargs.get("projects") or []:
                     if not _SLUG_RE.match(str(p)):
                         raise SandboxError(f"Unknown project '{p}'.")
-                if name in _HDL_CHECKED:
+                if name == "testbench_runner":
+                    # The runner may compile any HDL file it can reach (rtl_dir, files next
+                    # to the testbench), so every HDL file in the workspace must pass.
+                    hdl = sorted(p for p in ws.root.rglob("*") if p.is_file() and p.suffix.lower() in (".v", ".sv", ".vh", ".svh"))
+                    reason = check_hdl_sources(hdl) if hdl else None
+                    if reason:
+                        return {"status": "blocked", "message": reason}
+                    # ...and the exact compiler inputs, in compile order, before every
+                    # compile attempt (macro state depends on file order).
+                    kwargs["compile_check"] = check_hdl_sources
+                elif name in _HDL_CHECKED:
                     reason = check_hdl_sources([Path(kwargs[k]) for k in _HDL_CHECKED[name] if k in kwargs])
                     if reason:
                         return {"status": "blocked", "message": reason}

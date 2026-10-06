@@ -8,6 +8,7 @@ so the agent can tell the user what to install rather than failing silently.
 
 from __future__ import annotations
 
+import filecmp
 import json
 import os
 import re
@@ -15,8 +16,10 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Callable
 
 from ..llm import get_client, json_completion
+from .rtl_files import design_files, find_module_files, is_skipped_dir, project_files
 from .vcd import format_value, read_vcd
 
 
@@ -54,7 +57,7 @@ def _resolve_verilator() -> tuple[str, dict | None] | None:
     return exe, env
 
 
-_FAIL_LINE_RE = re.compile(r"\bFAIL(ED)?\b|\bERROR\b|\bMISMATCH\b", re.IGNORECASE)
+_FAIL_LINE_RE = re.compile(r"\bFAIL(ED)?\b|\bFATAL\b|\bERROR\b|\bMISMATCH\b", re.IGNORECASE)
 _PASS_LINE_RE = re.compile(r"\bPASS(ED)?\b", re.IGNORECASE)
 _FIELD_RE = re.compile(r"([A-Za-z_]\w*)\s*=\s*([^,\s]+)")
 
@@ -108,38 +111,248 @@ def _summarize_log(log: str, max_examples: int = 8) -> dict:
     }
 
 
-def testbench_runner(module_path: str, tb_path: str, timeout_s: int = 60) -> dict:
-    """Compiles and runs a Verilog testbench with Icarus Verilog, returns
+# Memory-init / program files a testbench may $readmemh / $readmemb by bare name.
+_DATA_EXTS = (".mem", ".hex", ".dat")
+_DATA_MAX_FILES = 300
+_DATA_MAX_BYTES = 50 * 1024 * 1024
+_DATA_SCAN_LIMIT = 20000  # files visited per search root
+
+
+def _safe_data_root(d: Path) -> bool:
+    """Never scan a drive root, the home folder, or anything above it."""
+    d, home = d.resolve(), Path.home().resolve()
+    return d.parent != d and d != home and d not in home.parents
+
+
+def _stage_data_files(roots: list[Path], dest: Path) -> tuple[dict[str, Path], dict[str, list[Path]]]:
+    """Copies program/memory files from roots into dest, flattened — as
+    Vivado does for its simulation directory — so `$readmemh("program.hex")`
+    finds them. Roots are in priority order (the testbench's own folder
+    first); within that order the first file of a given name wins. Returns
+    (staged name -> source, conflicts): conflicts lists other files with the
+    same name but DIFFERENT contents, which were not used."""
+    staged: dict[str, Path] = {}
+    conflicts: dict[str, list[Path]] = {}
+    total = 0
+    for root in roots:
+        if not root.is_dir() or not _safe_data_root(root):
+            continue
+        visited = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(d for d in dirnames if not is_skipped_dir(d))
+            for name in sorted(filenames):
+                visited += 1
+                if not name.lower().endswith(_DATA_EXTS):
+                    continue
+                src = Path(dirpath) / name
+                if name in staged:
+                    used = staged[name]
+                    if src.resolve() != used.resolve() and not filecmp.cmp(src, used, shallow=False):
+                        if src not in conflicts.setdefault(name, []) and len(conflicts[name]) < 5:
+                            conflicts[name].append(src)
+                    continue
+                size = src.stat().st_size
+                if len(staged) >= _DATA_MAX_FILES or total + size > _DATA_MAX_BYTES:
+                    continue
+                shutil.copy2(src, dest / name)
+                staged[name] = src
+                total += size
+            if visited > _DATA_SCAN_LIMIT:
+                break
+    return staged, conflicts
+
+
+def _vivado_mem_init_dirs(start: Path) -> list[Path]:
+    """`<proj>.ip_user_files/mem_init_files` of the Vivado project enclosing
+    `start` (the folder holding a .xpr, up to 6 levels up). Vivado keeps its
+    copies of the project's memory files there and hands them to xsim, so it
+    is the last place to look, matching what a Vivado simulation would see."""
+    for d in [start, *list(start.parents)[:6]]:
+        if not _safe_data_root(d):
+            break
+        try:
+            if any(p.suffix.lower() == ".xpr" for p in d.iterdir() if p.is_file()):
+                return sorted(p / "mem_init_files" for p in d.glob("*.ip_user_files") if (p / "mem_init_files").is_dir())
+        except OSError:
+            break
+    return []
+
+
+_UNOPENED_RE = re.compile(r"Unable to open (\S+?) for reading")
+
+
+def _display(path: Path, bases: list[Path]) -> str:
+    for base in bases:
+        try:
+            return path.relative_to(base).as_posix()
+        except ValueError:
+            continue
+    return path.name
+
+
+def testbench_runner(
+    module_path: str = "",
+    tb_path: str = "",
+    rtl_dir: str = "",
+    timeout_s: int = 60,
+    compile_check: Callable[[list[Path]], str | None] | None = None,
+) -> dict:
+    """Compiles and runs a Verilog testbench with Icarus Verilog and returns
     pass/fail plus a short summary instead of the raw simulator log.
+
+    The design comes from module_path (one file) and/or rtl_dir (a folder):
+    starting from the testbench, only the modules it actually instantiates
+    are compiled, so unrelated designs in the folder don't get in the way.
+    Program/memory files (.mem/.hex/.dat) near the testbench are staged into
+    the run directory, so `$readmemh("program.hex")` works as in Vivado.
+
+    compile_check (internal, not in the tool schema) is called with the
+    exact compiler inputs, in order, before every compile attempt; a non-None
+    reason aborts with status "blocked". The web demo uses it for its safety
+    check, since `ifdef outcomes depend on file order.
     """
     if not _tool_available("iverilog") or not _tool_available("vvp"):
         return {
             "status": "unavailable",
             "message": "iverilog/vvp not found on PATH. Install Icarus Verilog to enable this skill.",
         }
+    tb = Path(tb_path).resolve() if tb_path else None
+    if tb is None or not tb.is_file():
+        return {"status": "error", "message": f"No testbench file at '{tb_path}'."}
+    if not module_path and not rtl_dir:
+        return {"status": "error", "message": "Give module_path (a single design file) or rtl_dir (a folder of RTL sources)."}
+
+    explicit: list[Path] = []
+    search: list[Path] = []
+    bases = [tb.parent]
+    if module_path:
+        module = Path(module_path).resolve()
+        if not module.is_file():
+            return {"status": "error", "message": f"No design file at '{module_path}'."}
+        explicit.append(module)
+        search.append(module)
+    if rtl_dir:
+        rtl_root = Path(rtl_dir).resolve()
+        if not rtl_root.is_dir():
+            return {"status": "error", "message": f"No RTL folder at '{rtl_dir}'."}
+        bases.insert(0, rtl_root)
+        search += project_files(rtl_root, (".v", ".sv"))
+    # Helper modules sitting next to the testbench.
+    search += sorted(p for p in tb.parent.iterdir() if p.is_file() and p.suffix.lower() in (".v", ".sv"))
+    unique, seen = [], {tb}
+    for p in search:
+        p = p.resolve()
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+
+    tops, files, duplicates = design_files(tb, unique)
+    if not tops:
+        return {"status": "error", "message": f"No module defined in testbench '{tb_path}'."}
+    if duplicates:
+        return {
+            "status": "ambiguous_design",
+            "message": "These modules are defined in more than one file; pass module_path or a narrower rtl_dir.",
+            "duplicates": {m: [_display(f, bases) for f in fs] for m, fs in duplicates.items()},
+        }
+    files += [m for m in explicit if m not in files]
 
     # Per-call temp dir: portable (no /tmp on Windows) and safe if two runs overlap.
     with tempfile.TemporaryDirectory(prefix="copilot_tb_") as tmp:
-        out_bin = str(Path(tmp) / "tb.out")
-        compile_cmd = ["iverilog", "-o", out_bin, tb_path, module_path]
-        compile_res = subprocess.run(compile_cmd, capture_output=True, text=True, timeout=timeout_s)
-        if compile_res.returncode != 0:
-            return {"status": "compile_error", "stderr": compile_res.stderr.strip()[-2000:]}
+        run_dir = Path(tmp)
+        data_roots = [tb.parent, tb.parent.parent, *bases[:-1], *(m.parent for m in explicit),
+                      *_vivado_mem_init_dirs(tb.parent)]
+        staged, data_conflicts = _stage_data_files(data_roots, run_dir)
+        out_bin = run_dir / "tb.out"
+        for _ in range(6):  # compile; add files for modules iverilog reports as unknown
+            include_dirs = list(dict.fromkeys([tb.parent, *(f.parent for f in files)]))  # incl. files added by retries
+            if compile_check is not None and (reason := compile_check(list(files))):
+                return {"status": "blocked", "message": reason}
+            # SystemVerilog mode only when SV sources are compiled: it reserves
+            # words (logic, bit, int...) that plain Verilog designs may use as names.
+            sv = ["-g2012"] if any(f.suffix.lower() in (".sv", ".svh") for f in files) else []
+            cmd = ["iverilog", *sv, *[a for t in tops for a in ("-s", t)], *[f"-I{d}" for d in include_dirs],
+                   "-o", str(out_bin), *map(str, files)]
+            try:
+                compiled = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, cwd=tmp)
+            except subprocess.TimeoutExpired:
+                return {"status": "timeout", "message": f"Compilation took longer than {timeout_s}s."}
+            if compiled.returncode == 0:
+                break
+            unknown = set(re.findall(r"Unknown module type:\s*([A-Za-z_]\w*)", compiled.stderr))
+            extra = []
+            for name in sorted(unknown):
+                defining = find_module_files(name, unique)
+                if len(defining) > 1:  # same rule as the dependency walk: never guess
+                    return {
+                        "status": "ambiguous_design",
+                        "message": "These modules are defined in more than one file; pass module_path or a narrower rtl_dir.",
+                        "duplicates": {name: [_display(f, bases) for f in defining]},
+                    }
+                if defining and defining[0] not in files:
+                    extra.append(defining[0])
+            if not extra:
+                return {"status": "compile_error", "stderr": compiled.stderr.strip()[-2000:],
+                        "compiled_files": [_display(f, bases) for f in files][:60]}
+            files += extra
+        else:
+            return {"status": "compile_error", "stderr": compiled.stderr.strip()[-2000:],
+                    "compiled_files": [_display(f, bases) for f in files][:60]}
 
-        run_res = subprocess.run(["vvp", out_bin], capture_output=True, text=True, timeout=timeout_s)
-    log = run_res.stdout + run_res.stderr
+        try:
+            run_res = subprocess.run(["vvp", str(out_bin)], capture_output=True, text=True, timeout=timeout_s, cwd=tmp)
+            log, timed_out, exit_code = run_res.stdout + run_res.stderr, False, run_res.returncode
+        except subprocess.TimeoutExpired as exc:
+            partial = exc.stdout or ""
+            log = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
+            timed_out, exit_code = True, None
+
     summary = _summarize_log(log)
-    # Same line classification as the counts, so status and counts never disagree.
-    passed = summary["pass_lines"] > 0 and summary["fail_lines"] == 0
+    # Same line classification as the counts, so status and counts never
+    # disagree; a non-zero simulator exit ($fatal, crash) is never a pass.
+    passed = summary["pass_lines"] > 0 and summary["fail_lines"] == 0 and not timed_out and exit_code == 0
+    missing = sorted(set(_UNOPENED_RE.findall(log)))
+    if missing and not passed:
+        # Without its program/data the design runs on X's: the failures say
+        # nothing about the RTL, so say that first.
+        summary["headline"] = (
+            f"The simulation could not open {', '.join(missing)} (not found next to the testbench or in the "
+            "project), so these results are not meaningful until that file exists. " + summary["headline"]
+        )
     # A long raw tail drowns out the counts, so it's only sizeable when there
     # was nothing to count.
     tail_chars = 1500 if not (summary["pass_lines"] or summary["fail_lines"]) else 300
-    return {
-        "status": "pass" if passed else "fail_or_unknown",
+    if timed_out:
+        status = "timeout"
+    elif passed:
+        status = "pass"
+    else:
+        status = "missing_data_file" if missing else "fail_or_unknown"
+    result = {
+        "status": status,
+        "missing_data_files": missing,
         **summary,
         "summary": log.strip()[-tail_chars:],  # log tail
+        "top": tops,
+        "exit_code": exit_code,
+        "compiled_files": [_display(f, bases) for f in files][:60],
+        "data_files": sorted(staged)[:40],
         "note": "Pass/fail is inferred from PASS/FAIL text in the log — make sure your testbench prints one.",
     }
+    if data_conflicts:
+        # Several different files share a name; the one closest to the testbench was used.
+        data_bases = [tb.parent.parent, *bases]  # so two "prog.mem" paths stay distinguishable
+        result["data_file_conflicts"] = {
+            name: {"used": _display(staged[name], data_bases), "not_used": [_display(p, data_bases) for p in others]}
+            for name, others in sorted(data_conflicts.items())
+        }
+        result["note"] += (" Some program/data file names exist more than once with different contents; "
+                           "see data_file_conflicts for which copy was used.")
+    if timed_out:
+        result["message"] = f"Simulation did not finish within {timeout_s}s (missing $finish?); partial log shown."
+    elif exit_code and not passed:
+        result["message"] = f"The simulator exited with code {exit_code} ($fatal or a runtime error)."
+    return result
 
 
 def lint_checker(file_path: str, timeout_s: int = 30) -> dict:
@@ -324,14 +537,18 @@ SCHEMAS = [
         "type": "function",
         "function": {
             "name": "testbench_runner",
-            "description": "Compile and run a Verilog testbench, return pass/fail and a summary.",
+            "description": "Compile and run a Verilog testbench with Icarus Verilog; return pass/fail and a summary. "
+            "Give the testbench plus module_path (a single-file design) or rtl_dir (a folder of RTL sources: only "
+            "the modules the testbench instantiates are compiled). Program/memory files (.mem/.hex/.dat) near the "
+            "testbench are made available to $readmemh.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_path": {"type": "string"},
-                    "tb_path": {"type": "string"},
+                    "tb_path": {"type": "string", "description": "The testbench file."},
+                    "module_path": {"type": "string", "description": "Design file, for a single-file design."},
+                    "rtl_dir": {"type": "string", "description": "Folder with the design's RTL sources, for multi-file designs."},
                 },
-                "required": ["module_path", "tb_path"],
+                "required": ["tb_path"],
             },
         },
     },
