@@ -5,3 +5,6 @@ __pycache__/
 .copilot_pending_diffs.json
 *.vcd
 *.out
+# Local test environments / tool caches
+.codex-test-venv/
+.pytest_cache/
