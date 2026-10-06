@@ -43,7 +43,7 @@ spotter, Next-step suggester, Daily/weekly brief.
 
 ## Acceptance criteria (Devpost)
 - [ ] Working project on Nemotron via Token Factory
-- [ ] Working demo URL
+- [x] Working demo URL
 - [ ] <=3 min public YouTube demo video
 - [ ] Public repo with OSS license + README
 - [ ] Project description + feedback on Nebius/NVIDIA tools
