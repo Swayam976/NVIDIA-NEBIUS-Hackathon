@@ -123,6 +123,31 @@ with tempfile.TemporaryDirectory() as d:
     assert r["status"] == "error" and "cut off" in r["message"], r
 print("modify_module: an edit cut off by the output limit proposes nothing: OK")
 
+# --- review round 2 ---
+# A last line without a newline gets its own record + marker, never merged.
+with tempfile.TemporaryDirectory() as d:
+    f = Path(d) / "m.v"
+    f.write_text("module m;\nendmodule", encoding="utf-8")
+    module_modifier._PENDING_DIFFS_PATH = Path(d) / "pending.json"
+    diff_id = module_modifier.stage_pending([(str(f), "module m;\nendmodule // edited")])
+    diff_text, _ = module_modifier.preview_pending_diff(diff_id)
+    assert "-endmodule\n\\ No newline at end of file\n+endmodule // edited\n\\ No newline at end of file\n" in diff_text
+    module_modifier._PENDING_DIFFS_PATH = REPO / ".copilot_pending_diffs.json"
+# The web approval panel escapes control/bidi characters too.
+ws = sandbox.create_workspace(MEMORY_DIR, REPO / "demo" / "sample")
+try:
+    shown = sandbox.display_diff(ws, "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b‮/* hidden */\x1b[2K\n")
+    assert "‮" not in shown and "\x1b" not in shown and "+b\\u202e/* hidden */\\x1b[2K" in shown, repr(shown)
+finally:
+    shutil.rmtree(ws.root, ignore_errors=True)
+# Every skill completion has an output bound (here: next_step_suggester).
+from src.copilot.tools import workflow  # noqa: E402
+seen = []
+with mock.patch.object(workflow, "get_client", return_value=scripted_client([message("Do X next.")], seen)):
+    workflow.next_step_suggester("riscv-core")
+assert seen and seen[0]["max_tokens"] == 16000, seen
+print("review round 2: no-newline markers, web panel escapes controls, skill completions bounded: OK")
+
 # --- 6 and 8 need a simulator ---
 if not (shutil.which("iverilog") and shutil.which("vvp")):
     print("simulator cases: SKIPPED (iverilog/vvp not on PATH)")
@@ -140,6 +165,10 @@ else:
                                     encoding="utf-8")
         r = verification.testbench_runner(module_path=str(d / "dut.v"), tb_path=str(d / "mem_tb.v"))
         assert r["status"] == "missing_data_file" and r["pass_lines"] == 1, r
+        (d / "mem_tb.v").write_text((d / "mem_tb.v").read_text().replace("nope.hex", "program data.hex"),
+                                    encoding="utf-8")
+        r = verification.testbench_runner(module_path=str(d / "dut.v"), tb_path=str(d / "mem_tb.v"))
+        assert r["status"] == "missing_data_file" and r["missing_data_files"] == ["program data.hex"], r
     print("testbench_runner: endless output stopped (output_limit); PASS with a missing data file is not a pass: OK")
 
 print("\nHARDENING TESTS PASSED")

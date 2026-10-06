@@ -162,8 +162,9 @@ def loop(root: Path, model: Model, **kw):
 try:
     # The loop's own instructions must not switch off modify_module's
     # whitespace guard (found live: "same style" did, and a blank line was dropped).
-    for text in (vl_mod._RTL_INSTRUCTION, vl_mod._TB_INSTRUCTION, vl_mod._COMPILE_FIX_INSTRUCTION):
-        filled = text.format(goal="add a NOR op", module="rtl/alu.v", diff="+x", stderr="err")
+    for text in (vl_mod._RTL_INSTRUCTION, vl_mod._TB_INSTRUCTION, vl_mod._COMPILE_FIX_INSTRUCTION,
+                 vl_mod._LINT_FIX_INSTRUCTION):
+        filled = text.format(goal="add a NOR op", module="rtl/alu.v", diff="+x", stderr="err", errors="e")
         assert not module_modifier._WHITESPACE_ASK_RE.search(filled), filled
 
     # --- 1. passes in round 1 ---
@@ -317,11 +318,14 @@ try:
     assert r["model_calls"] == 1, "stopped before the testbench edits"
     old_tb = 'initial $readmemh("prog.hex", mem);\n`include "defs.vh"\n'
     assert new_risky_features(old_tb, old_tb + "// moved nothing\n") == [], "the user's own I/O is not counted"
-    assert new_risky_features(old_tb, old_tb.replace("prog.hex", "/etc/passwd")) == ['$readmemh("/etc/passwd")']
+    assert new_risky_features(old_tb, old_tb.replace("prog.hex", "/etc/passwd")) == ['$readmemh("/etc/passwd", mem)']
     assert new_risky_features("", "`define include x\n") and new_risky_features("", "$`T(1);")
     assert new_risky_features("", "assert property ($past(x) |-> $rose(y));") == [], "pure SV functions allowed"
     # Full review: uncommenting an existing call is new access.
-    assert new_risky_features('// f = $fopen("o.txt", "w");\n', 'f = $fopen("o.txt", "w");\n') == ['$fopen("o.txt")']
+    assert new_risky_features('// f = $fopen("o.txt", "w");\n', 'f = $fopen("o.txt", "w");\n') == ['$fopen("o.txt", "w")']
+    # Review round 2: the whole call is the key, so a new mode or a built-up path is new access.
+    assert new_risky_features('f = $fopen("o.txt", "r");', 'f = $fopen("o.txt", "w");') == ['$fopen("o.txt", "w")']
+    assert new_risky_features('$readmemh(MEM, m);', '$readmemh({"C:", "/x"}, m);') == ['$readmemh({"C:", "/x"}, m)']
     # The simulation guard: compares preprocessed inputs with the originals.
     g = work / "guard"
     for sub in ("project", "original"):
@@ -340,18 +344,18 @@ try:
     gc.write(g / "project" / "m.v", '`include "defs.vh"\nmodule m; integer f; initial f = `LOG("C:/x.txt"); endmodule\n')
     assert vl_mod.new_risky_features('`include "defs.vh"\n', (g / "project/m.v").read_text()) == [], "raw check misses it"
     reason = guard([(g / "project" / "m.v").resolve()])
-    assert reason and '$fopen("C:/x.txt")' in reason, reason
+    assert reason and '$fopen("C:/x.txt", "w")' in reason, reason
     # (b) an edited design that writes through a non-literal path is not run.
     gc.edited.clear()
     gc.write(g / "project" / "w.v", (g / "original/w.v").read_text() + "// touched\n")
     assert "non-literal path" in guard([(g / "project" / "w.v").resolve()])
-    # (c) a non-literal read is fine, unless the edit adds a path-like string to feed it.
+    # (c) review round 2: any non-literal path (reads too) in a design the loop
+    # changed is not run: a parameter or concatenation could steer it.
     gc.edited.clear()
+    assert guard([(g / "project" / "r.v").resolve()]) is None, "nothing edited yet"
     gc.write(g / "project" / "r.v", (g / "original/r.v").read_text() + "// touched\n")
-    assert guard([(g / "project" / "r.v").resolve()]) is None
-    gc.write(g / "project" / "r.v", (g / "original/r.v").read_text().replace('"ops.hex"', '"C:/Users/x/secret.txt"'))
     reason = guard([(g / "project" / "r.v").resolve()])
-    assert reason and "add a path" in reason, reason
+    assert reason and "non-literal path" in reason and "$readmemh(MEM, k)" in reason, reason
     # End to end: a blocked simulation stops the loop and stages nothing.
     root = project("p_macro")
     (root / "rtl/defs.vh").write_text('`define LOG(p) $fopen(p, "w")\n', encoding="utf-8")
@@ -390,6 +394,31 @@ try:
                                tb_path=str(root / "sim/alu_tb.v"))
     assert r["status"] == "error" and "rtl/top.v" in r["message"] and r["pending_diff"] is None, r
     print("verify_loop: risky edits never simulated, Vivado mem_init found, stale inputs stage nothing: OK")
+
+    # --- review round 2: lint decides too ---
+    def fake_lint(path, compile_check):
+        if "original" in Path(path).parts:
+            return {"warnings": 0, "errors": ["%Error: alu.v:1:1: Cannot find module 'x'"]}  # pre-existing
+        text = Path(path).read_text(encoding="utf-8")
+        errors = ["%Error: alu.v:9:1: Cannot find module 'x'"]  # same error, moved: not new
+        if "BADLINT" in text:
+            errors.append("%Error: alu.v:7:5: Signal 'q' is not declared")
+        return {"warnings": 0, "errors": errors}
+
+    root = project("p_lint")
+    m = Model({"alu.v": [GOOD.replace("endmodule", "// BADLINT\nendmodule"), GOOD], "alu_tb.v": [ALU_TB_NEW]})
+    with mock.patch.object(vl_mod, "_lint", side_effect=fake_lint):
+        r = loop(root, m)
+    assert r["status"] == "passed" and len(r["attempts"]) == 2, r
+    assert "new lint error(s) in alu.v: %Error: alu.v:7:5: Signal 'q' is not declared" in r["attempts"][0]["root_cause"]
+    assert "fix lint error" in r["attempts"][1]["change"] and r["model_calls"] == 4 and "BADLINT" not in r["diff"], r
+    # A lint run the guard refuses stops the loop like a blocked simulation.
+    root = project("p_lint_blocked")
+    with mock.patch.object(vl_mod, "_lint", side_effect=lambda path, cc: {"blocked": "nope"}
+                           if "original" not in Path(path).parts else {"warnings": 0, "errors": []}):
+        r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
+    assert r["status"] == "blocked" and "lint alu.v: nope" in r["message"] and r["pending_diff"] is None, r
+    print("verify_loop: new lint errors are fixed before 'passed'; old/moved ones ignored; blocked lint stops: OK")
 
     # --- no change from the model -> nothing staged ---
     root = project("p_none")

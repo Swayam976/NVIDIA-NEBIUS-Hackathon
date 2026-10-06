@@ -36,6 +36,7 @@ def build_brief(today: str | None = None) -> str:
     note_model_call()
     response = get_client().chat.completions.create(
         model=settings.nebius_model,
+        max_tokens=16000,
         messages=[
             {"role": "system", "content": _BRIEF_SYSTEM_PROMPT},
             {"role": "user", "content": f"Date: {today}\nProjects:\n{json.dumps(rollup, indent=2)}"},

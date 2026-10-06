@@ -33,6 +33,7 @@ from typing import Callable, Iterator
 
 from . import memory
 from .config import settings
+from .display import visible
 from .tools import TOOL_IMPLS, TOOL_SCHEMAS, module_modifier
 from .tools.hdl_safety import (  # noqa: F401 - ALLOWED_SYSTEM_TASKS re-exported
     ALLOWED_DIRECTIVES, ALLOWED_SYSTEM_TASKS, DEFINE_RE, DIRECTIVE_RE, RESERVED_DIRECTIVES, SYSTASK_RE,
@@ -269,9 +270,10 @@ _HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
 
 def display_diff(ws: Workspace, diff_text: str) -> str:
     """Hides the server path in each file's ---/+++ header only (a diff can
-    cover several files). Hunk bodies are walked by their line counts and
-    shown byte-for-byte, so a body line that merely looks like a header is
-    never altered: the approval covers exactly this content."""
+    cover several files). Hunk bodies are walked by their line counts, so a
+    body line that merely looks like a header is never altered; their only
+    change is that control/bidi characters are shown as escapes (display.
+    visible), so what the visitor approves looks like what gets written."""
     lines = diff_text.splitlines(keepends=True)
     out, i = [], 0
     while i < len(lines):
@@ -292,7 +294,7 @@ def display_diff(ws: Workspace, diff_text: str) -> str:
                     new -= 1
                 elif not body.startswith("\\"):
                     old, new = old - 1, new - 1
-    return "".join(out)
+    return visible("".join(out))
 
 
 def pending_diff_ids(ws: Workspace) -> list[str]:

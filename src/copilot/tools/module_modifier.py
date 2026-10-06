@@ -84,6 +84,22 @@ def _tokens(line: str) -> list[str]:
     return _TOKEN_RE.findall(line)
 
 
+def unified_diff_text(old: str, new: str, path: str) -> str:
+    """Unified diff of old -> new for `path`. A last line without a newline
+    gets its own line plus git's "\\ No newline at end of file" marker, so a
+    removed and an added line can never run together on one display line."""
+    out = []
+    for line in difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
+                                     fromfile=f"a/{path}", tofile=f"b/{path}"):
+        if line.endswith("\n"):
+            out.append(line)
+        else:
+            out.append(line + "\n")
+            if line[:1] in ("-", "+", " ") and not line.startswith(("--- ", "+++ ")):
+                out.append("\\ No newline at end of file\n")
+    return "".join(out)
+
+
 def propose_edit(module_path: str, instruction: str) -> dict:
     """One model call that proposes a new version of a file. Writes nothing
     and stores nothing: returns {"status": "ok", "new_content", "explanation",
@@ -122,16 +138,8 @@ def propose_edit(module_path: str, instruction: str) -> dict:
     if not _WHITESPACE_ASK_RE.search(instruction):
         new_content = _keep_original_whitespace(original, new_content)
 
-    diff_lines = list(
-        difflib.unified_diff(
-            original.splitlines(keepends=True),
-            new_content.splitlines(keepends=True),
-            fromfile=f"a/{module_path}",
-            tofile=f"b/{module_path}",
-        )
-    )
     return {"status": "ok", "new_content": new_content, "explanation": explanation,
-            "diff": "".join(diff_lines) or "(no changes)"}
+            "diff": unified_diff_text(original, new_content, module_path) or "(no changes)"}
 
 
 def modify_module(module_path: str, instruction: str) -> dict:
@@ -215,14 +223,7 @@ def preview_pending_diff(diff_id: str) -> tuple[str, str] | None:
     for path, new_content in _entry_files(entry):
         current = _current_content(path)
         currents.append(current)
-        diffs.append("".join(
-            difflib.unified_diff(
-                current.splitlines(keepends=True),
-                new_content.splitlines(keepends=True),
-                fromfile=f"a/{path}",
-                tofile=f"b/{path}",
-            )
-        ))
+        diffs.append(unified_diff_text(current, new_content, path))
     diff = "".join(diffs)
     return diff or "(no changes)", _entry_fingerprint(entry, currents)
 

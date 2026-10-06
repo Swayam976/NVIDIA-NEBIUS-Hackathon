@@ -60,6 +60,7 @@ def commit_to_summary(repo_path: str, since: str = "1.week") -> dict:
     note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
+        max_tokens=16000,
         messages=[
             {"role": "system", "content": "Summarize a git commit log into 3-5 plain-English bullet points of what actually got done. No fluff."},
             {"role": "user", "content": "\n".join(commits)},
@@ -125,6 +126,7 @@ def next_step_suggester(project: str) -> dict:
     note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
+        max_tokens=16000,
         messages=[
             {
                 "role": "system",

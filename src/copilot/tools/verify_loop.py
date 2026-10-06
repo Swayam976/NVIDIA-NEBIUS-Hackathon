@@ -14,7 +14,6 @@ every exit path, and nothing here runs git.
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import os
 import re
@@ -27,8 +26,8 @@ from typing import Callable
 
 from ..llm import count_model_calls
 from .debugging import diagnose_failure
-from .hdl_safety import access_features, new_risky_features, nonliteral_paths, nonliteral_writes, path_literals
-from .module_modifier import propose_edit, stage_pending
+from .hdl_safety import access_features, new_risky_features, nonliteral_paths
+from .module_modifier import propose_edit, stage_pending, unified_diff_text
 from .rtl_files import _DEF_RE, _instantiates, _read_code, design_files, is_testbench, project_files
 from .verification import _tool_available, _vivado_mem_init_dirs, lint_checker, testbench_runner
 
@@ -51,6 +50,10 @@ _TB_INSTRUCTION = (
     "encodings), and if the goal adds or changes behaviour this testbench exercises, add checks for it in "
     "the same way, with the same PASS/FAIL messages, as the existing checks. Do not change existing "
     "checks unless the design change makes them wrong. If no change is needed, return the file unchanged."
+)
+_LINT_FIX_INSTRUCTION = (
+    "Verilator lint reports these new errors in this file:\n{errors}\n"
+    "Fix them while keeping the intended change (design goal: {goal}). Change nothing else."
 )
 _COMPILE_FIX_INSTRUCTION = (
     "Icarus Verilog reports these compile errors:\n{stderr}\n"
@@ -153,9 +156,11 @@ def _sim_guard(copy: _Copy, original_root: Path, outer):
     loop has edited anything, the exact compiler inputs may not reach a file
     or process in any way the user's original files did not: compared after
     preprocessing (so a macro can't hide it), comments ignored (so
-    uncommenting counts). And if an edited file is compiled in, a file can't
-    be written through a non-literal path, nor a non-literal path be fed by
-    a new path-like string from the edit."""
+    uncommenting counts), each call keyed by its whole argument list (so a
+    new path or mode counts). And once an edited file is compiled in, no file
+    may be opened through a non-literal path at all: an edit could steer it
+    (a parameter, a concatenation), so that design is not run unreviewed.
+    Static, deliberately strict: when in doubt the loop stops and says so."""
     def original_of(path: Path) -> Path:
         return original_root / path.relative_to(copy.root) if _inside(path, copy.root) else path
 
@@ -178,15 +183,10 @@ def _sim_guard(copy: _Copy, original_root: Path, outer):
                     "not simulated unreviewed.")
         edited = [f for f in new_paths if f in copy.edited]
         if edited:
-            if writes := nonliteral_writes(new_f):
-                return (f"The design writes files through a non-literal path ({', '.join(writes[:3])}) and the "
-                        "loop changed it, so it was not simulated unreviewed.")
-            new_literals = sum((path_literals(f.read_text(encoding="utf-8", errors="replace")) -
-                                path_literals(original_of(f).read_text(encoding="utf-8", errors="replace"))
-                                for f in edited if original_of(f).is_file()), Counter())
-            if new_literals and nonliteral_paths(new_f):
-                return (f"The loop's edits add a path ({', '.join(sorted(new_literals)[:2])}) to a design that opens "
-                        "files by non-literal name, so it was not simulated unreviewed.")
+            if paths := nonliteral_paths(new_f):
+                return (f"This design opens files through a non-literal path ({', '.join(paths[:3])}) and the "
+                        "loop changed it, so it was not simulated unreviewed. Make the change with modify_module "
+                        "and run testbench_runner after approving it instead.")
         return None
 
     return check
@@ -251,25 +251,48 @@ def _verdict(run: dict) -> str:
     return str(status).replace("_", " ")
 
 
-def _lint(path: Path, compile_check) -> int | str:
+def _lint(path: Path, compile_check) -> dict:
+    """{"warnings": n, "errors": [...]}, {"blocked": reason} or {"unavailable": status}."""
     if compile_check is not None and (reason := compile_check([path])):
-        return f"blocked ({reason})"
+        return {"blocked": reason}
     res = lint_checker(str(path))
     if res.get("status") in ("clean", "issues_found"):
-        return res.get("warning_count", 0)
-    return str(res.get("status"))
+        found = res.get("warnings", [])
+        errors = [w for w in found if w.startswith("%Error")]
+        return {"warnings": len(found) - len(errors), "errors": errors}
+    return {"unavailable": str(res.get("status"))}
 
 
-def _lint_text(copy: _Copy, results: dict[Path, int | str], baseline: dict[Path, int | str]) -> str:
-    parts = []
-    for path, count in results.items():
-        was = baseline.get(path)
-        if isinstance(count, int):
-            text = "clean" if count == 0 else f"{count} warning(s)"
-            if isinstance(was, int) and was != count:
-                text += f" (was {was})"
+def _new_lint_errors(now: dict, base: dict) -> list[str]:
+    """Lint errors the change introduced (line numbers ignored, so moved
+    code doesn't count as new). Errors the original file already had, e.g.
+    submodules not found when linting one file alone, are not counted."""
+    def key(e: str) -> str:
+        return re.sub(r":\d+(?::\d+)?:", ":", e)
+    remaining = Counter(key(e) for e in base.get("errors", []))
+    new = []
+    for e in now.get("errors", []):
+        if remaining[key(e)]:
+            remaining[key(e)] -= 1
         else:
-            text = count
+            new.append(e)
+    return new
+
+
+def _lint_text(copy: _Copy, results: dict[Path, dict], baseline: dict[Path, dict]) -> str:
+    parts = []
+    for path, now in results.items():
+        if "blocked" in now:
+            text = f"blocked ({now['blocked']})"
+        elif "unavailable" in now:
+            text = now["unavailable"]
+        else:
+            errors, warnings = len(now["errors"]), now["warnings"]
+            text = "clean" if not (errors or warnings) else ", ".join(
+                x for x in (f"{errors} error(s)" if errors else "", f"{warnings} warning(s)" if warnings else "") if x)
+            was = baseline.get(path, {})
+            if "warnings" in was and (was["warnings"], len(was["errors"])) != (warnings, errors):
+                text += f" (was {len(was['errors'])} error(s), {was['warnings']} warning(s))"
         parts.append(f"{Path(copy.rel(path)).name}: {text}")
     return "; ".join(parts)
 
@@ -288,8 +311,7 @@ def _compile_error_file(stderr: str, copy: _Copy) -> Path | None:
 
 
 def _unified(old: str, new: str, label: str) -> str:
-    return "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                        fromfile=f"a/{label}", tofile=f"b/{label}"))
+    return unified_diff_text(old, new, label)
 
 
 def _table(attempts: list[dict]) -> str:
@@ -417,6 +439,9 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
     for rnd in range(1, _MAX_ROUNDS + 1):
         runs = run_all()
         lint_now = {p: _lint(p, compile_check) for p in copy.edited if not is_testbench(p) or p == t_module}
+        for p in lint_now:
+            if p not in lint_base:  # baseline = the same file as the user has it
+                lint_base[p] = _lint(tmp / "original" / p.relative_to(proj), compile_check)
         row = {
             "round": rnd,
             "change": copy.untemp(change),
@@ -426,21 +451,37 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
             "model_calls": change_calls,
         }
         attempts.append(row)
-        if blocked := [t for t in tests if runs[t].get("status") == "blocked"]:
-            # The guard refused to simulate what the model wrote: report it, stage nothing.
+        blocked = [f"{t.name}: {runs[t].get('message')}" for t in tests if runs[t].get("status") == "blocked"]
+        blocked += [f"lint {p.name}: {r['blocked']}" for p, r in lint_now.items() if "blocked" in r]
+        if blocked:
+            # The guard refused to run what the model wrote: report it, stage nothing.
             return {"status": "blocked", "pending_diff": None, "attempts": attempts, "attempts_table": _table(attempts),
-                    "message": copy.untemp(f"{blocked[0].name}: {runs[blocked[0]].get('message')}")}
+                    "message": copy.untemp(blocked[0])}
+        lint_errors = {p: e for p in lint_now if (e := _new_lint_errors(lint_now[p], lint_base.get(p, {})))}
         required = must_pass + [t for t in tests if t in copy.edited and t not in must_pass]
         failing = [t for t in required if runs[t].get("status") != "pass"]
-        if not failing:
+        if not failing and not lint_errors:
             status = "passed"
             break
         last = rnd == _MAX_ROUNDS
-        bad = failing[0]
-        run = runs[bad]
         start = calls[0]
         change = ""
-        if run.get("status") == "compile_error":
+        bad = failing[0] if failing else None
+        run = runs[bad] if bad else {}
+        if bad is None:
+            # Tests pass, but the change brought new lint errors: not done yet.
+            target, errors = next(iter(lint_errors.items()))
+            row["root_cause"] = copy.untemp(f"new lint error(s) in {target.name}: {errors[0]}")
+            if not last:
+                fix = _propose(target, _LINT_FIX_INSTRUCTION.format(errors="\n".join(errors[:20]), goal=goal))
+                if fix["status"] == "ok" and fix["new_content"] != target.read_text(encoding="utf-8"):
+                    if refused := _accept(copy, target, fix["new_content"]):
+                        stop_reason = refused
+                    else:
+                        change = f"{target.name}: fix lint error ({fix['explanation']})"
+                else:
+                    stop_reason = "The model proposed no fix for the lint errors."
+        elif run.get("status") == "compile_error":
             stderr = run.get("stderr", "")
             first = next((l for l in stderr.splitlines() if l.strip()), "compile error")
             row["root_cause"] = copy.untemp(f"{bad.name} does not compile: {first}")

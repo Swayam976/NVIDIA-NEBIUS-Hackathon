@@ -5,24 +5,13 @@ Run with: python -m src.copilot.cli
 
 from __future__ import annotations
 
-import re
 import sys
 
 from .config import settings
+from .display import visible
 from .llm import run_agent_loop
 from .tools import TOOL_IMPLS, TOOL_SCHEMAS
 from .tools.module_modifier import approve_pending_diff, preview_pending_diff
-
-
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
-
-
-def visible(text: str) -> str:
-    """Terminal control characters (ANSI escapes, carriage returns, bidi
-    overrides...) shown as \\xNN instead of interpreted, so a diff can't
-    hide or rewrite its own lines on screen before the approval prompt."""
-    return _CONTROL_RE.sub(lambda m: f"\\x{ord(m.group()):02x}" if ord(m.group()) < 256 else f"\\u{ord(m.group()):04x}",
-                           text)
 
 
 def confirm_tool_call(name: str, args: dict) -> bool:

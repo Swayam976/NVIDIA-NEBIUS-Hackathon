@@ -180,7 +180,7 @@ def _vivado_mem_init_dirs(start: Path) -> list[Path]:
     return []
 
 
-_UNOPENED_RE = re.compile(r"Unable to open (\S+?) for reading")
+_UNOPENED_RE = re.compile(r"Unable to open (.+?) for reading\.?\r?$", re.MULTILINE)  # names may contain spaces
 
 
 _LOG_MAX_BYTES = 8 * 1024 * 1024  # simulator output kept; a run printing more is stopped

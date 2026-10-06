@@ -250,6 +250,7 @@ def spec_drafting_assistant(project: str, section_hint: str) -> dict:
     note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
+        max_tokens=16000,
         messages=[
             {
                 "role": "system",

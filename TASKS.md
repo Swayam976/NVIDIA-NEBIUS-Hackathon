@@ -27,6 +27,24 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
 
+- 2026-10-06, Claude, task 18 (whole-copilot Codex review, round 2 of 3):
+  7 findings, all fixed. (1+2, blocking) the loop's HDL keys ignored the
+  $fopen mode and built-up paths: access features are now keyed by the
+  WHOLE normalised argument list, and once an edited file is compiled in,
+  ANY non-literal file path (reads too) blocks the run with a pointer to
+  modify_module + testbench_runner (strict on purpose; e.g. a design using
+  $readmemh(PARAM) can't be looped, literal-path designs like the RISC-V
+  core are unaffected). Codex keeps asking for an OS sandbox; not
+  available portably on Windows, noted as residual risk. (3) diffs without
+  a final newline merged -/+ lines: module_modifier.unified_diff_text adds
+  "\ No newline at end of file" records (CLI, web, verify_loop). (4) web
+  panel rendered bidi/control chars: shared display.visible() used by both
+  approval surfaces. (5) skill completions now all have max_tokens. (6)
+  missing data files with spaces in the name are detected. (7) verify_loop:
+  a blocked lint stops the loop (nothing staged) and new lint errors (vs
+  the user's original file, line numbers ignored) must be fixed before
+  "passed" (one fix call per round).
+
 - 2026-10-06, Claude, task 18 (whole-copilot Codex review, round 1 of 3):
   9 findings, all fixed. (1) CLI passed undeclared args (vcd_out could
   overwrite a file): run_agent_loop now keeps only schema-declared args and
