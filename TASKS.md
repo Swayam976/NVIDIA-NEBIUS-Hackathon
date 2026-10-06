@@ -51,6 +51,14 @@ Deadline: Oct 30, 2026, 1:00pm EDT
   the CLI (blocking; fixed via hdl_safety), mem_init_files outside the copy,
   stale non-edited inputs (fixed). 2 rounds used. New check:
   tests/test_verify_loop.py (also re-run test_sandbox, test_apply_gate).
+  Live on the real RISC-V ALU ("add NOR at ctrl 4'b1010"): passed in 2 rounds,
+  4 Nemotron calls, ~44 s; round 1 failed on the old shift bug, debug found
+  ALU_tb.v:47 and fixed it; diff = ALU.v NOR arm + ALU_tb.v (NOR check, loop
+  to 11, b[4:0]); cpu_top_tb (compile error) and debug_tb (no PASS/FAIL) were
+  already failing -> reported unverified; real files byte-identical. Self-
+  found live: the tb instruction said "same style", which switched off
+  modify_module's whitespace guard (a blank line got dropped); reworded +
+  test that no loop instruction trips it.
 
 - 2026-10-06, Claude, task 16 done: testbench_auditor (tools/debugging.py),
   18 skills now. Report only: never writes; fixes go through modify_module

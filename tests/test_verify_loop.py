@@ -160,6 +160,12 @@ def loop(root: Path, model: Model, **kw):
 
 
 try:
+    # The loop's own instructions must not switch off modify_module's
+    # whitespace guard (found live: "same style" did, and a blank line was dropped).
+    for text in (vl_mod._RTL_INSTRUCTION, vl_mod._TB_INSTRUCTION, vl_mod._COMPILE_FIX_INSTRUCTION):
+        filled = text.format(goal="add a NOR op", module="rtl/alu.v", diff="+x", stderr="err")
+        assert not module_modifier._WHITESPACE_ASK_RE.search(filled), filled
+
     # --- 1. passes in round 1 ---
     root = project("p1")
     m = Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]})

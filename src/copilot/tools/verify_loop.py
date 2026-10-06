@@ -47,7 +47,7 @@ _TB_INSTRUCTION = (
     "The design file {module} was just changed for this goal:\n{diff}\n"
     "Update this testbench to match: it must still compile against the changed module (ports, parameters, "
     "encodings), and if the goal adds or changes behaviour this testbench exercises, add checks for it in "
-    "the same style and with the same PASS/FAIL messages as the existing checks. Do not change existing "
+    "the same way, with the same PASS/FAIL messages, as the existing checks. Do not change existing "
     "checks unless the design change makes them wrong. If no change is needed, return the file unchanged."
 )
 _COMPILE_FIX_INSTRUCTION = (
