@@ -19,13 +19,15 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Callable
 
 from ..llm import count_model_calls
 from .debugging import diagnose_failure
-from .hdl_safety import new_risky_features
+from .hdl_safety import access_features, new_risky_features, nonliteral_paths, nonliteral_writes, path_literals
 from .module_modifier import propose_edit, stage_pending
 from .rtl_files import _DEF_RE, _instantiates, _read_code, design_files, is_testbench, project_files
 from .verification import _tool_available, _vivado_mem_init_dirs, lint_checker, testbench_runner
@@ -128,6 +130,66 @@ def _accept(copy: _Copy, path: Path, new: str) -> str | None:
                 "the loop does not simulate that unreviewed.")
     copy.write(path, new)
     return None
+
+
+def _expand(paths: list[Path]) -> str | None:
+    """The sources after the preprocessor (macros expanded, includes pulled
+    in), as iverilog sees them; None if preprocessing fails."""
+    include_dirs = list(dict.fromkeys(p.parent for p in paths))
+    with tempfile.TemporaryDirectory(prefix="copilot_pp_") as d:
+        out = Path(d) / "pp.v"
+        try:
+            res = subprocess.run(["iverilog", "-E", "-o", str(out), *[f"-I{x}" for x in include_dirs], *map(str, paths)],
+                                 capture_output=True, text=True, timeout=30, cwd=d)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if res.returncode != 0 or not out.is_file():
+            return None
+        return out.read_text(encoding="utf-8", errors="replace")
+
+
+def _sim_guard(copy: _Copy, original_root: Path, outer):
+    """compile_check for every simulation and lint in the loop. Once the
+    loop has edited anything, the exact compiler inputs may not reach a file
+    or process in any way the user's original files did not: compared after
+    preprocessing (so a macro can't hide it), comments ignored (so
+    uncommenting counts). And if an edited file is compiled in, a file can't
+    be written through a non-literal path, nor a non-literal path be fed by
+    a new path-like string from the edit."""
+    def original_of(path: Path) -> Path:
+        return original_root / path.relative_to(copy.root) if _inside(path, copy.root) else path
+
+    def check(files: list[Path]) -> str | None:
+        if outer is not None and (reason := outer(files)):
+            return reason
+        if not copy.edited:
+            return None  # the user's own, unchanged code
+        new_paths = [Path(f).resolve() for f in files]
+        old_paths = [original_of(f) for f in new_paths]
+        new_x, old_x = _expand(new_paths), _expand(old_paths)
+        if new_x is None:
+            return "The changed sources could not be preprocessed, so they were not simulated unreviewed."
+        read = lambda ps: "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in ps if f.is_file())  # noqa: E731
+        new_raw, old_raw = read(new_paths), read(old_paths)
+        new_f = access_features(new_x) + access_features(new_raw)
+        old_f = access_features(old_x if old_x is not None else old_raw) + access_features(old_raw)
+        if added := sorted((new_f - old_f).keys()):
+            return (f"The loop's edits add file/process access ({', '.join(added[:4])}); "
+                    "not simulated unreviewed.")
+        edited = [f for f in new_paths if f in copy.edited]
+        if edited:
+            if writes := nonliteral_writes(new_f):
+                return (f"The design writes files through a non-literal path ({', '.join(writes[:3])}) and the "
+                        "loop changed it, so it was not simulated unreviewed.")
+            new_literals = sum((path_literals(f.read_text(encoding="utf-8", errors="replace")) -
+                                path_literals(original_of(f).read_text(encoding="utf-8", errors="replace"))
+                                for f in edited if original_of(f).is_file()), Counter())
+            if new_literals and nonliteral_paths(new_f):
+                return (f"The loop's edits add a path ({', '.join(sorted(new_literals)[:2])}) to a design that opens "
+                        "files by non-literal name, so it was not simulated unreviewed.")
+        return None
+
+    return check
 
 
 def _snapshot_data(dirs: list[Path], dest: Path) -> tuple[list[Path], dict[Path, str]]:
@@ -299,6 +361,8 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
     data_dirs, data_hashes = _snapshot_data(
         [d for d in _vivado_mem_init_dirs(tb.parent) if not _inside(d, root)], tmp / "data")
     copy = _Copy(proj, base=tmp)
+    shutil.copytree(proj, tmp / "original")  # pristine copy: what the guard compares against
+    compile_check = _sim_guard(copy, tmp / "original", compile_check)
     t_module, t_tb, t_rtl = proj / module.relative_to(root), proj / tb.relative_to(root), proj / rtl_root.relative_to(root)
     if not (t_module.is_file() and t_tb.is_file()):
         return {"status": "error", "message": "module_path or tb_path sits in a generated folder that is not copied."}
@@ -362,6 +426,10 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
             "model_calls": change_calls,
         }
         attempts.append(row)
+        if blocked := [t for t in tests if runs[t].get("status") == "blocked"]:
+            # The guard refused to simulate what the model wrote: report it, stage nothing.
+            return {"status": "blocked", "pending_diff": None, "attempts": attempts, "attempts_table": _table(attempts),
+                    "message": copy.untemp(f"{blocked[0].name}: {runs[blocked[0]].get('message')}")}
         required = must_pass + [t for t in tests if t in copy.edited and t not in must_pass]
         failing = [t for t in required if runs[t].get("status") != "pass"]
         if not failing:

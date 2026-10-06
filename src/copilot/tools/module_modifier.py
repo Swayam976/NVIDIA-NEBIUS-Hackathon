@@ -107,7 +107,10 @@ def propose_edit(module_path: str, instruction: str) -> dict:
             },
         ],
         response_format={"type": "json_object"},
+        max_tokens=32000,
     )
+    if getattr(response.choices[0], "finish_reason", None) == "length":
+        return {"status": "error", "message": "The model's edit was cut off (output limit); nothing was proposed."}
     try:
         payload = json.loads(response.choices[0].message.content or "{}")
         new_content = payload["new_content"]

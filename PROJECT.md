@@ -52,6 +52,6 @@ auditor, Verify loop (closed change-test-debug loop).
 
 ## Checks to run before calling anything done
 - `python tests/smoke_test.py` (mocked LLM, no network)
-- `python tests/test_apply_gate.py`, `tests/test_brief.py`, `tests/test_sandbox.py`, `tests/test_skills.py`, `tests/test_multifile.py`, `tests/test_debugging.py`, `tests/test_auditor.py`, `tests/test_verify_loop.py`,
+- `python tests/test_apply_gate.py`, `tests/test_brief.py`, `tests/test_sandbox.py`, `tests/test_skills.py`, `tests/test_multifile.py`, `tests/test_debugging.py`, `tests/test_auditor.py`, `tests/test_verify_loop.py`, `tests/test_hardening.py`,
   `tests/test_verification.py`, `tests/test_web_demo.py` (needs `pip install -r demo/requirements.txt`)
 - Any new unit tests under `tests/`

@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -182,6 +183,43 @@ def _vivado_mem_init_dirs(start: Path) -> list[Path]:
 _UNOPENED_RE = re.compile(r"Unable to open (\S+?) for reading")
 
 
+_LOG_MAX_BYTES = 8 * 1024 * 1024  # simulator output kept; a run printing more is stopped
+
+
+def _run_capped(cmd: list[str], timeout_s: int, cwd: str) -> tuple[str, int | None, bool, bool]:
+    """Runs cmd with stdout+stderr merged, keeping at most _LOG_MAX_BYTES:
+    a testbench that prints forever is killed instead of filling memory.
+    Returns (output, exit code or None, timed out, output limit hit)."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    chunks: list[bytes] = []
+    state = {"total": 0, "over": False}
+
+    def pump() -> None:
+        for chunk in iter(lambda: proc.stdout.read(65536), b""):
+            room = _LOG_MAX_BYTES - state["total"]
+            if room > 0:
+                chunks.append(chunk[:room])
+            state["total"] += len(chunk)
+            if state["total"] > _LOG_MAX_BYTES:
+                state["over"] = True
+                proc.kill()
+                break
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        code = proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        timed_out, code = True, None
+    reader.join(timeout=5)
+    proc.stdout.close()
+    text = b"".join(chunks).decode(errors="replace").replace("\r\n", "\n")
+    return text, (None if state["over"] else code), timed_out, state["over"]
+
+
 def _display(path: Path, bases: list[Path]) -> str:
     for base in bases:
         try:
@@ -322,13 +360,7 @@ def testbench_runner(
             return {"status": "compile_error", "stderr": compiled.stderr.strip()[-2000:],
                     "compiled_files": [_display(f, bases) for f in files][:60]}
 
-        try:
-            run_res = subprocess.run(["vvp", str(out_bin)], capture_output=True, text=True, timeout=timeout_s, cwd=tmp)
-            log, timed_out, exit_code = run_res.stdout + run_res.stderr, False, run_res.returncode
-        except subprocess.TimeoutExpired as exc:
-            partial = exc.stdout or ""
-            log = partial.decode(errors="replace") if isinstance(partial, bytes) else partial
-            timed_out, exit_code = True, None
+        log, exit_code, timed_out, too_much = _run_capped(["vvp", str(out_bin)], timeout_s, tmp)
 
         vcd_copied = False
         if vcd_out is not None:
@@ -343,8 +375,10 @@ def testbench_runner(
     summary = _summarize_log(log)
     # Same line classification as the counts, so status and counts never
     # disagree; a non-zero simulator exit ($fatal, crash) is never a pass.
-    passed = summary["pass_lines"] > 0 and summary["fail_lines"] == 0 and not timed_out and exit_code == 0
     missing = sorted(set(_UNOPENED_RE.findall(log)))
+    # A run that couldn't open its program/data file is never a pass, whatever it printed.
+    passed = (summary["pass_lines"] > 0 and summary["fail_lines"] == 0 and not timed_out and not too_much
+              and exit_code == 0 and not missing)
     if missing and not passed:
         # Without its program/data the design runs on X's: the failures say
         # nothing about the RTL, so say that first.
@@ -357,6 +391,8 @@ def testbench_runner(
     tail_chars = 1500 if not (summary["pass_lines"] or summary["fail_lines"]) else 300
     if timed_out:
         status = "timeout"
+    elif too_much:
+        status = "output_limit"
     elif passed:
         status = "pass"
     else:
@@ -386,6 +422,9 @@ def testbench_runner(
                            "see data_file_conflicts for which copy was used.")
     if timed_out:
         result["message"] = f"Simulation did not finish within {timeout_s}s (missing $finish?); partial log shown."
+    elif too_much:
+        result["message"] = (f"The simulation printed more than {_LOG_MAX_BYTES // (1024 * 1024)} MB and was stopped; "
+                             "the counts cover only the part kept.")
     elif exit_code and not passed:
         result["message"] = f"The simulator exited with code {exit_code} ($fatal or a runtime error)."
     return result

@@ -4,7 +4,7 @@ Deploy with main file `demo/streamlit_app.py`. Secrets (TOML, app settings):
     NEBIUS_API_KEY = "..."
     DEMO_PASSWORD  = "..."
 Optional: NEBIUS_MODEL, NEBIUS_BASE_URL, DEMO_SESSION_LIMIT (default 15),
-DEMO_DAILY_LIMIT (default 150).
+DEMO_DAILY_LIMIT (default 150), DEMO_MODEL_CALLS_PER_MESSAGE (default 30).
 
 Each visitor gets a throwaway workspace (project memory + a sample ALU).
 Every tool is confined to it (src/copilot/sandbox.py). The model can only
@@ -52,6 +52,8 @@ from src.copilot.tools import module_modifier  # noqa: E402
 SAMPLE_DIR = REPO_ROOT / "demo" / "sample"
 SESSION_LIMIT = int(_secret("DEMO_SESSION_LIMIT", "15"))
 DAILY_LIMIT = int(_secret("DEMO_DAILY_LIMIT", "150"))
+# Every model call one message may cause (agent turns + calls inside tools, e.g. verify_loop).
+MODEL_CALLS_PER_MESSAGE = int(_secret("DEMO_MODEL_CALLS_PER_MESSAGE", "30"))
 EXAMPLES = [
     "Run the testbench rtl/alu_tb.v against rtl/alu.v and tell me what fails.",
     "Fix the failing operation in rtl/alu.v.",
@@ -233,6 +235,7 @@ def main() -> None:
                 tool_impls=impls,
                 confirm_tool_call=None,  # fail closed: approval only via the panel
                 extra_system=_extra_system(s.ws, memory.list_projects()),
+                max_model_calls=MODEL_CALLS_PER_MESSAGE,
             )
             s.history = _compact(history)
         except Exception as exc:  # noqa: BLE001 - keep the page alive, don't leak details

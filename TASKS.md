@@ -22,9 +22,31 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 15 | New skill: debug_failing_test (run tb, locate first mismatch in VCD, root cause, fix as pending diff) | Claude | done |
 | 16 | New skill: testbench_auditor (expected-value model vs RTL/spec, report only) | Claude | done |
 | 17 | New skill: verify_loop (closed loop: change -> test -> debug in a temp copy, max 3 rounds, one gated diff) | Claude | done |
+| 18 | Whole-copilot Codex review x3 + fixes | Claude | in progress (Claude) |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 18 (whole-copilot Codex review, round 1 of 3):
+  9 findings, all fixed. (1) CLI passed undeclared args (vcd_out could
+  overwrite a file): run_agent_loop now keeps only schema-declared args and
+  reports ignored_arguments. (2) verify_loop's raw-text HDL check missed
+  uncommented calls and macros: hdl_safety is comment-aware and keyed by
+  literal/non-literal path, and every simulation/lint in the loop runs a
+  guard that compares the preprocessed (iverilog -E) inputs with a pristine
+  copy, blocks non-literal-path writes and new path strings feeding
+  non-literal reads once an edited file is compiled in; a blocked run stops
+  the loop and stages nothing. (3) CLI printed diffs raw: control/bidi chars
+  are now shown as \xNN before the approval prompt. (4) memory accepted
+  "../.." project names: slugs only, confined to MEMORY_DIR. (5) web
+  spec_drafting could read a server checkout: activate() maps only
+  sample-alu -> workspace rtl. (6) unbounded simulator output: capped at
+  8 MB (status output_limit). (7) spend: count_model_calls is nested and
+  budgeted; run_agent_loop(max_model_calls) covers tool calls too (web demo
+  30/message), agent max_tokens 16000, edit calls 32000 + cut-off check.
+  (8) PASS + unopened data file was "pass": now missing_data_file. (9)
+  auditor without the model said coverage complete: now partial, with
+  expected_values_found vs checked. New check: tests/test_hardening.py.
 
 - 2026-10-06, Claude, task 17 done: verify_loop (tools/verify_loop.py), 19
   skills. Copies the project (project_files: generated/VCS trees skipped,

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from . import memory
+from .config import settings
 from .tools import TOOL_IMPLS, TOOL_SCHEMAS, module_modifier
 from .tools.hdl_safety import (  # noqa: F401 - ALLOWED_SYSTEM_TASKS re-exported
     ALLOWED_DIRECTIVES, ALLOWED_SYSTEM_TASKS, DEFINE_RE, DIRECTIVE_RE, RESERVED_DIRECTIVES, SYSTASK_RE,
@@ -116,17 +117,24 @@ _GLOBALS_LOCK = threading.Lock()
 
 @contextmanager
 def activate(ws: Workspace) -> Iterator[None]:
-    """Points the memory store and pending-diff store at this session's
-    workspace for the duration of the block. Serialises sessions: the core
-    modules keep these paths as module globals."""
+    """Points the memory store, the pending-diff store and the project repo
+    map at this session's workspace for the duration of the block.
+    Serialises sessions: the core modules keep these as module globals."""
     with _GLOBALS_LOCK:
         saved = (memory.MEMORY_DIR, module_modifier._PENDING_DIFFS_PATH)
+        repos = settings.project_repo_paths  # a dict on a frozen dataclass: swap its contents
+        saved_repos = dict(repos)
         memory.MEMORY_DIR = ws.memory_dir
         module_modifier._PENDING_DIFFS_PATH = ws.pending_path
+        # Only the workspace's own sample design; never a checkout configured on the server.
+        repos.clear()
+        repos["sample-alu"] = str(ws.root / "rtl")
         try:
             yield
         finally:
             memory.MEMORY_DIR, module_modifier._PENDING_DIFFS_PATH = saved
+            repos.clear()
+            repos.update(saved_repos)
 
 
 # ------------------------------------------------------------- HDL checks

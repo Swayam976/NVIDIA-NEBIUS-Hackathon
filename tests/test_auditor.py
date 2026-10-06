@@ -82,6 +82,9 @@ print("testbench_auditor: model findings merged, invalid lines dropped, refs val
 # --- outage: rule findings stand; reasoning cut off -> one retry without it ---
 r, calls = audit([RuntimeError("down"), RuntimeError("down")])
 assert [f["line"] for f in r["findings"]] == [47, 48, 49] and "unavailable" in r["model_review"], r
+# Full review: without the model only the rule ran, so coverage is partial, not "complete".
+assert r["coverage"] == "partial" and r["expected_values_found"] == 11 and r["expected_values_checked"] == 0, r
+assert "only the shift-amount rule ran" in r["summary"], r["summary"]
 r, calls = audit([RuntimeError("cut off"), json.dumps({"findings": []})])
 assert len(calls) == 2 and calls[1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 print("testbench_auditor: outage keeps rule findings; one retry without reasoning: OK")

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .. import memory
 from ..config import settings
-from ..llm import get_client, json_completion
+from ..llm import get_client, json_completion, note_model_call
 from .rtl_files import HDL_EXTS, instance_connections, is_testbench, module_interfaces, project_files, project_identifiers
 
 # Matches mnemonic-looking tokens: e.g. ADD, ADDI, LW, custom.foo
@@ -247,6 +247,7 @@ def spec_drafting_assistant(project: str, section_hint: str) -> dict:
     else:
         rtl_block = "No RTL source is available for this project, so do not name any modules or signals."
     client = get_client()
+    note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
         messages=[

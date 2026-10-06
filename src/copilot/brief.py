@@ -17,7 +17,7 @@ import os
 import sys
 
 from .config import settings
-from .llm import get_client
+from .llm import get_client, note_model_call
 from .tools.workflow import daily_brief
 
 _BRIEF_SYSTEM_PROMPT = """\
@@ -33,6 +33,7 @@ def build_brief(today: str | None = None) -> str:
     # CI runners use UTC; the workflow passes the user's local date as BRIEF_DATE.
     today = today or os.environ.get("BRIEF_DATE") or _dt.date.today().isoformat()
     rollup = daily_brief()["projects"]
+    note_model_call()
     response = get_client().chat.completions.create(
         model=settings.nebius_model,
         messages=[

@@ -32,8 +32,18 @@ class ProjectNotFound(Exception):
     pass
 
 
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
 def _path_for(project: str) -> Path:
-    return MEMORY_DIR / f"{project}.md"
+    """The project's memory file. Only plain slugs (riscv-core) are accepted,
+    so a name like "../../README" can never point outside MEMORY_DIR."""
+    if not isinstance(project, str) or not _SLUG_RE.match(project):
+        raise ProjectNotFound(f"'{project}' is not a project name (lowercase letters, digits and dashes).")
+    path = MEMORY_DIR / f"{project}.md"
+    if path.resolve().parent != MEMORY_DIR.resolve():
+        raise ProjectNotFound(f"'{project}' is not a project name.")
+    return path
 
 
 def list_projects() -> list[str]:

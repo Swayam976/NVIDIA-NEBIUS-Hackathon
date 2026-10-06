@@ -320,6 +320,46 @@ try:
     assert new_risky_features(old_tb, old_tb.replace("prog.hex", "/etc/passwd")) == ['$readmemh("/etc/passwd")']
     assert new_risky_features("", "`define include x\n") and new_risky_features("", "$`T(1);")
     assert new_risky_features("", "assert property ($past(x) |-> $rose(y));") == [], "pure SV functions allowed"
+    # Full review: uncommenting an existing call is new access.
+    assert new_risky_features('// f = $fopen("o.txt", "w");\n', 'f = $fopen("o.txt", "w");\n') == ['$fopen("o.txt")']
+    # The simulation guard: compares preprocessed inputs with the originals.
+    g = work / "guard"
+    for sub in ("project", "original"):
+        (g / sub).mkdir(parents=True)
+        (g / sub / "defs.vh").write_text('`define LOG(p) $fopen(p, "w")\n', encoding="utf-8")
+        (g / sub / "m.v").write_text('`include "defs.vh"\nmodule m; endmodule\n', encoding="utf-8")
+        (g / sub / "r.v").write_text('module r #(parameter MEM = "ops.hex"); reg [7:0] k [0:1];\n'
+                                     '  initial $readmemh(MEM, k); endmodule\n', encoding="utf-8")
+        (g / sub / "w.v").write_text('module w; reg [8*8:1] n = "o.txt"; integer f;\n'
+                                     '  initial f = $fopen(n, "w"); endmodule\n', encoding="utf-8")
+    gc = vl_mod._Copy((g / "project").resolve())
+    guard = vl_mod._sim_guard(gc, (g / "original").resolve(), None)
+    proj_files = [(g / "project" / n).resolve() for n in ("m.v", "r.v", "w.v")]
+    assert guard(proj_files) is None, "nothing edited: the user's own code runs"
+    # (a) a macro hides $fopen from a raw-text check; the preprocessed text shows it.
+    gc.write(g / "project" / "m.v", '`include "defs.vh"\nmodule m; integer f; initial f = `LOG("C:/x.txt"); endmodule\n')
+    assert vl_mod.new_risky_features('`include "defs.vh"\n', (g / "project/m.v").read_text()) == [], "raw check misses it"
+    reason = guard([(g / "project" / "m.v").resolve()])
+    assert reason and '$fopen("C:/x.txt")' in reason, reason
+    # (b) an edited design that writes through a non-literal path is not run.
+    gc.edited.clear()
+    gc.write(g / "project" / "w.v", (g / "original/w.v").read_text() + "// touched\n")
+    assert "non-literal path" in guard([(g / "project" / "w.v").resolve()])
+    # (c) a non-literal read is fine, unless the edit adds a path-like string to feed it.
+    gc.edited.clear()
+    gc.write(g / "project" / "r.v", (g / "original/r.v").read_text() + "// touched\n")
+    assert guard([(g / "project" / "r.v").resolve()]) is None
+    gc.write(g / "project" / "r.v", (g / "original/r.v").read_text().replace('"ops.hex"', '"C:/Users/x/secret.txt"'))
+    reason = guard([(g / "project" / "r.v").resolve()])
+    assert reason and "add a path" in reason, reason
+    # End to end: a blocked simulation stops the loop and stages nothing.
+    root = project("p_macro")
+    (root / "rtl/defs.vh").write_text('`define LOG(p) $fopen(p, "w")\n', encoding="utf-8")
+    sneaky = GOOD.replace("module alu(", '`include "defs.vh"\nmodule alu(').replace(
+        "  always @(*) begin", '  integer f;\n  initial f = `LOG("C:/Users/victim/x.txt");\n  always @(*) begin')
+    (root / "rtl/alu.v").write_text(ALU.replace("module alu(", '`include "defs.vh"\nmodule alu('), encoding="utf-8")
+    r = loop(root, Model({"alu.v": [sneaky]}))
+    assert r["status"] == "blocked" and "$fopen" in r["message"] and r["pending_diff"] is None, r
     # (2) Vivado mem_init_files outside project_dir are found in the copy too.
     outer = work / "p_vivado"
     for rel, text in FILES.items():

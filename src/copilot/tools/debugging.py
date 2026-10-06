@@ -43,6 +43,7 @@ _NOT_DEBUGGABLE = {
                          "about the design. Provide the missing file first.",
     "timeout": "The simulation did not finish (no $finish reached), so there is no failing check to debug.",
     "ambiguous_design": "A module is defined in more than one file; narrow module_path/rtl_dir first.",
+    "output_limit": "The simulation printed too much output and was stopped, so there is no reliable failing check.",
 }
 
 
@@ -470,19 +471,23 @@ def testbench_auditor(tb_path: str, module_path: str = "", rtl_dir: str = "", sp
     findings.sort(key=lambda f: (f["line"], f["id"]))
     for f in findings:
         f["file"] = tb.name
-    partial = bool(truncated or omitted)
+    partial = bool(truncated or omitted) or bool(model_note)
+    if model_note:
+        why = "only the shift-amount rule ran, the model review was unavailable."
+    else:
+        why = (f"the model saw only part of the sources (truncated: {', '.join(p.name for p in truncated) or 'none'}; "
+               f"omitted: {', '.join(p.name for p in omitted) or 'none'}).")
     return {
         "status": "ok",
         "testbench": str(tb),
-        "expected_values_checked": len(expected),
+        "expected_values_found": len(expected),
+        "expected_values_checked": 0 if model_note else len(expected),  # reviewed against the RTL by the model
         "findings": findings,
         "coverage": "partial" if partial else "complete",
         "context": {"shown": [p.name for p in shown], "truncated": [p.name for p in truncated],
                     "omitted": [p.name for p in omitted]},
         "summary": f"{len(findings)} mismatch(es) in {len(expected)} expected-value computation(s)"
-        + (f"; partial check: the model saw only part of the sources (truncated: "
-           f"{', '.join(p.name for p in truncated) or 'none'}; omitted: {', '.join(p.name for p in omitted) or 'none'})."
-           if partial else "."),
+        + (f"; partial check: {why}" if partial else "."),
         **({"model_review": model_note} if model_note else {}),
         "note": "Report only: nothing was changed. To fix a finding, ask for it; the fix goes through "
         "modify_module and apply_diff, which asks for the user's explicit yes.",

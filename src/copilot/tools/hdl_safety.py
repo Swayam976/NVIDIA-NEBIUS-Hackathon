@@ -52,33 +52,66 @@ DIRECTIVE_RE = re.compile(r"`\s*([A-Za-z_]\w*)")
 SYSTASK_RE = re.compile(r"\$([A-Za-z_][\w$]*)")
 
 _STRING = r'"(?:\\.|[^"\\\n])*"'
-_TASK_CALL_RE = re.compile(rf"\$([A-Za-z_][\w$]*)\s*(?:\(\s*({_STRING})?)?")
+_TASK_CALL_RE = re.compile(rf"\$([A-Za-z_][\w$]*)\s*(\(\s*({_STRING})?)?")
 _DIRECTIVE_CALL_RE = re.compile(rf"`\s*([A-Za-z_]\w*)\s*({_STRING}|<[^>\n]*>)?")
 _TOKEN_TRICKS = ("``", '`"', "`\\", "$`")
+_COMMENT_OR_STRING_RE = re.compile(rf'{_STRING}|//[^\n]*|/\*.*?\*/', re.DOTALL)
+_STRING_RE = re.compile(_STRING)
+# System tasks that take a file path; the first group can also create/overwrite one.
+_WRITE_PATH_TASKS = frozenset({"fopen", "writememh", "writememb", "dumpfile", "dumpports", "fdumpports"})
+_PATH_TASKS = _WRITE_PATH_TASKS | {"readmemh", "readmemb", "sdf_annotate"}
+_PATH_LITERAL_RE = re.compile(r'^"(?:[A-Za-z]:[\\/]|[\\/]|\.\.?[\\/]|[^"\s]*\.[A-Za-z0-9]{1,5}"$)')
 
 
-def _risky_features(text: str) -> Counter:
-    """Every construct that could reach a file or process, with its first
-    string argument (so the same call with a new path counts as new)."""
-    text = text.replace("\\\r\n", " ").replace("\\\n", " ")
+def strip_comments(text: str) -> str:
+    """Comments blanked (newlines kept), string literals kept, in one
+    left-to-right pass so a "//" inside a string is not a comment."""
+    def blank(m: re.Match) -> str:
+        return m.group(0) if m.group(0).startswith('"') else re.sub(r"[^\n]", " ", m.group(0))
+    return _COMMENT_OR_STRING_RE.sub(blank, text.replace("\\\r\n", " ").replace("\\\n", " "))
+
+
+def access_features(text: str) -> Counter:
+    """Every construct in the code (comments ignored) that could reach a
+    file or process, keyed with its first argument when that is a string
+    literal ("<expr>" otherwise), so the same call with a new path counts as
+    new. Plain macro uses are not counted here: check the preprocessed text
+    (iverilog -E) to see what they expand to."""
+    code = strip_comments(text)
     found: Counter = Counter()
-    defined = set(DEFINE_RE.findall(text))
-    for name in defined & RESERVED_DIRECTIVES:
+    for name in set(DEFINE_RE.findall(code)) & RESERVED_DIRECTIVES:
         found[f"`define {name}"] += 1
-    for name, arg in _TASK_CALL_RE.findall(text):
+    for name, paren, arg in _TASK_CALL_RE.findall(code):
         if name not in ALLOWED_SYSTEM_TASKS and name not in _PURE_SV_FUNCTIONS:
-            found[f"${name}({arg})" if arg else f"${name}"] += 1
-    for name, arg in _DIRECTIVE_CALL_RE.findall(text):
-        if name not in ALLOWED_DIRECTIVES and (name not in defined or name in RESERVED_DIRECTIVES):
+            found[f"${name}({arg or '<expr>'})" if paren else f"${name}"] += 1
+    for name, arg in _DIRECTIVE_CALL_RE.findall(code):
+        if name in RESERVED_DIRECTIVES - ALLOWED_DIRECTIVES:
             found[f"`{name} {arg}".strip()] += 1
     for trick in _TOKEN_TRICKS:
-        if n := text.count(trick):
+        if n := code.count(trick):
             found[trick] = n
     return found
 
 
 def new_risky_features(old: str, new: str) -> list[str]:
     """Constructs with file/process access that `new` has more of than
-    `old`: what a proposed edit would ADD. Existing uses (the user's own
-    $readmemh, `include ...) are not counted against the edit."""
-    return sorted((_risky_features(new) - _risky_features(old)).keys())
+    `old`: what a proposed edit would ADD (uncommenting one counts). The
+    user's own existing uses ($readmemh, `include ...) are not counted."""
+    return sorted((access_features(new) - access_features(old)).keys())
+
+
+def nonliteral_writes(features: Counter) -> list[str]:
+    """Calls that can create/overwrite a file whose path is not a literal."""
+    return sorted(k for k in features if k.startswith("$") and
+                  k[1:].split("(")[0] in _WRITE_PATH_TASKS and not k.endswith('")'))
+
+
+def nonliteral_paths(features: Counter) -> list[str]:
+    """Any file-path task whose path is not a literal ($readmemh(MEM_FILE))."""
+    return sorted(k for k in features if k.startswith("$") and k[1:].split("(")[0] in _PATH_TASKS
+                  and not k.endswith('")'))
+
+
+def path_literals(text: str) -> Counter:
+    """String literals in the code that look like file paths."""
+    return Counter(m for m in _STRING_RE.findall(strip_comments(text)) if _PATH_LITERAL_RE.match(m))

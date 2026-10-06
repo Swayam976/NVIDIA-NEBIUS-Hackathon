@@ -11,7 +11,7 @@ from pathlib import Path
 
 from .. import memory
 from ..config import settings
-from ..llm import get_client
+from ..llm import get_client, note_model_call
 from .rtl_files import HDL_EXTS, is_generated, is_testbench, project_files
 
 
@@ -57,6 +57,7 @@ def commit_to_summary(repo_path: str, since: str = "1.week") -> dict:
         return {"status": "ok", "summary": f"No commits since {since}.", "commit_count": 0}
 
     client = get_client()
+    note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
         messages=[
@@ -121,6 +122,7 @@ def next_step_suggester(project: str) -> dict:
     status = memory.get_status(project)
     blockers = memory.get_blockers(project)
     client = get_client()
+    note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
         messages=[
