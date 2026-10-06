@@ -27,6 +27,14 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
 
+- 2026-10-07, Claude, CLI resilience (found while guiding Swayam through a
+  live run: a DNS blip, getaddrinfo failed, crashed the whole CLI). cli.main
+  now reports a failed request and keeps the session; run_agent_loop keeps
+  the results of tools that already ran when a later model call fails and
+  says which ones completed, so an approved apply_diff is never silently
+  lost or redone (Codex review, 1 round: that case, fixed). Tests in
+  tests/test_hardening.py.
+
 - 2026-10-06, Claude, task 18 done (whole-copilot Codex review, round 3 of 3):
   8 findings, all fixed. (1, blocking) apply_diff wrote CRLF proposals as
   CR CR LF on Windows: proposals are LF-normalised before they are shown,

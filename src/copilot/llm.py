@@ -127,6 +127,7 @@ def run_agent_loop(
     system = SYSTEM_PROMPT + ("\n" + extra_system if extra_system else "")
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
 
+    completed: list[str] = []  # "tool: status" for every tool that ran this turn
     with count_model_calls(max_model_calls):
         for _ in range(max_turns):
             try:
@@ -134,13 +135,22 @@ def run_agent_loop(
             except ModelBudgetExceeded:
                 return ("I've used this request's model-call budget before finishing; ask again with a "
                         "narrower request.", messages[1:])
-            response = client.chat.completions.create(
-                model=settings.nebius_model,
-                messages=messages,
-                tools=tool_schemas,
-                tool_choice="auto",
-                max_tokens=16000,
-            )
+            try:
+                response = client.chat.completions.create(
+                    model=settings.nebius_model,
+                    messages=messages,
+                    tools=tool_schemas,
+                    tool_choice="auto",
+                    max_tokens=16000,
+                )
+            except Exception as exc:
+                if not completed:
+                    raise  # nothing happened yet: the caller reports it, the user asks again
+                # Tools already ran (maybe an approved apply_diff): keep their results
+                # in the history and say so, rather than inviting a blind retry.
+                return (f"The model request failed ({type(exc).__name__}) after these actions had already "
+                        f"completed: {'; '.join(completed)}. Their results are kept; check them before "
+                        "asking again so nothing is done twice.", messages[1:])
             choice = response.choices[0]
             msg = choice.message
             messages.append(msg.model_dump(exclude_none=True))
@@ -177,6 +187,7 @@ def run_agent_loop(
                         result = {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
                 if dropped and isinstance(result, dict):
                     result = {**result, "ignored_arguments": dropped}
+                completed.append(f"{name}: {result.get('status') if isinstance(result, dict) else 'done'}")
 
                 messages.append(
                     {

@@ -72,13 +72,23 @@ def main() -> None:
         if user_input.lower() in {"exit", "quit"}:
             break
 
-        reply, history = run_agent_loop(
-            user_message=user_input,
-            history=history,
-            tool_schemas=TOOL_SCHEMAS,
-            tool_impls=TOOL_IMPLS,
-            confirm_tool_call=confirm_tool_call,
-        )
+        try:
+            reply, history = run_agent_loop(
+                user_message=user_input,
+                history=history,
+                tool_schemas=TOOL_SCHEMAS,
+                tool_impls=TOOL_IMPLS,
+                confirm_tool_call=confirm_tool_call,
+            )
+        except KeyboardInterrupt:
+            print("\n(interrupted; that request was dropped)\n")
+            continue
+        except Exception as exc:  # noqa: BLE001 - one failed request must not end the session
+            # e.g. openai.APIConnectionError after a network drop. The request is
+            # dropped (history unchanged) and the user can simply ask again.
+            print(visible(f"\ncopilot> The model request failed ({type(exc).__name__}: {exc}). "
+                          "Check your connection and ask again.\n"))
+            continue
         print(visible(f"\ncopilot> {reply}\n"))
 
 

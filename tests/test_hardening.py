@@ -148,6 +148,48 @@ with mock.patch.object(workflow, "get_client", return_value=scripted_client([mes
 assert seen and seen[0]["max_tokens"] == 16000, seen
 print("review round 2: no-newline markers, web panel escapes controls, skill completions bounded: OK")
 
+# --- a network error drops one request, not the whole CLI session ---
+inputs = iter(["first question", "second question", "exit"])
+calls = []
+
+
+def flaky_loop(**kw):
+    calls.append(kw["user_message"])
+    if len(calls) == 1:
+        raise ConnectionError("getaddrinfo failed")
+    return "fine", [{"role": "user", "content": kw["user_message"]}]
+
+
+out = io.StringIO()
+with mock.patch.object(cli.settings.__class__, "validate", lambda self: []), \
+     mock.patch.object(cli, "run_agent_loop", side_effect=lambda **kw: flaky_loop(**kw)), \
+     mock.patch("builtins.input", side_effect=lambda _prompt="": next(inputs)), mock.patch("sys.stdout", new=out):
+    cli.main()
+assert calls == ["first question", "second question"], calls
+assert "request failed (ConnectionError: getaddrinfo failed)" in out.getvalue() and "copilot> fine" in out.getvalue()
+print("CLI: a failed model request is reported and the session continues: OK")
+
+# Codex review: a failure AFTER a tool ran keeps that result and says so.
+ran = []
+turns = [message(calls=[tool_call("probe", {"tb_path": "t.v"})])]
+seen = []
+client = scripted_client(turns, seen)
+real_create = client.chat.completions.create
+
+
+def create_then_fail(**kw):
+    if len(seen) == 1:
+        raise ConnectionError("getaddrinfo failed")
+    return real_create(**kw)
+
+
+client.chat.completions.create = create_then_fail
+with mock.patch.object(llm, "get_client", return_value=client):
+    reply, history = llm.run_agent_loop("go", [], SCHEMA, {"probe": lambda **kw: ran.append(kw) or {"status": "ok"}})
+assert ran == [{"tb_path": "t.v"}] and "already completed: probe: ok" in reply and "nothing is done twice" in reply
+assert any(m.get("role") == "tool" for m in history), "the tool result stays in the history"
+print("agent loop: a failure after a tool ran keeps its result and reports it: OK")
+
 # --- 6 and 8 need a simulator ---
 if not (shutil.which("iverilog") and shutil.which("vvp")):
     print("simulator cases: SKIPPED (iverilog/vvp not on PATH)")
