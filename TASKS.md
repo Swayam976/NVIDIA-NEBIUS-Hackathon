@@ -19,6 +19,15 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
 
+- 2026-10-06, Claude, task 6 first CI run (manual) failed in "Write brief":
+  APIConnectionError "Connection error." Reproduced locally with a dummy
+  key: a trailing newline in the key -> httpx LocalProtocolError -> SDK
+  reports "Connection error" (a clean wrong key gives 401 instead), so the
+  pasted Actions secret almost certainly has trailing whitespace. Fix:
+  config strips whitespace from NEBIUS_* env values (blank -> default);
+  brief prints the cause *type* only (message can echo the auth header).
+  Tests added in test_brief.py. Codex: no findings. Next: re-run workflow.
+
 - 2026-10-06, Swayam verified the live demo in a browser (no issues) ->
   task 7 done, "Working demo URL" ticked in PROJECT.md.
 

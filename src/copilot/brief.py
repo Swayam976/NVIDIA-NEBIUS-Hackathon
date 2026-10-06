@@ -59,7 +59,9 @@ def main() -> int:
     try:
         print(build_brief())
     except Exception as exc:  # noqa: BLE001 - still emit the raw rollup so the run isn't wasted
-        print(f"Brief generation failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # Cause *type* only: its message can echo request headers (the API key).
+        cause = f" (cause: {type(exc.__cause__).__name__})" if exc.__cause__ else ""
+        print(f"Brief generation failed: {type(exc).__name__}: {exc}{cause}", file=sys.stderr)
         print(json.dumps(daily_brief()["projects"], indent=2))
         return 1
     return 0

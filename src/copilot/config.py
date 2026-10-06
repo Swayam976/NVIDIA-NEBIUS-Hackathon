@@ -14,14 +14,21 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MEMORY_DIR = REPO_ROOT / "memory" / "projects"
 
 
+def _env(name: str, default: str = "") -> str:
+    """Env value with surrounding whitespace removed. Pasted secrets often
+    carry a trailing newline, which httpx rejects in the auth header and the
+    OpenAI SDK then reports as a vague "Connection error"."""
+    return os.getenv(name, "").strip() or default
+
+
 @dataclass(frozen=True)
 class Settings:
-    nebius_api_key: str = field(default_factory=lambda: os.getenv("NEBIUS_API_KEY", ""))
+    nebius_api_key: str = field(default_factory=lambda: _env("NEBIUS_API_KEY"))
     nebius_base_url: str = field(
-        default_factory=lambda: os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.us-central1.nebius.com/v1/")
+        default_factory=lambda: _env("NEBIUS_BASE_URL", "https://api.tokenfactory.us-central1.nebius.com/v1/")
     )
     nebius_model: str = field(
-        default_factory=lambda: os.getenv("NEBIUS_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        default_factory=lambda: _env("NEBIUS_MODEL", "nvidia/nemotron-3-super-120b-a12b")
     )
 
     project_repo_paths: dict = field(
