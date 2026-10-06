@@ -8,12 +8,16 @@ so the agent can tell the user what to install rather than failing silently.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+from ..config import settings
+from ..llm import get_client
 
 
 _IS_WINDOWS = os.name == "nt"
@@ -50,6 +54,60 @@ def _resolve_verilator() -> tuple[str, dict | None] | None:
     return exe, env
 
 
+_FAIL_LINE_RE = re.compile(r"\bFAIL(ED)?\b|\bERROR\b|\bMISMATCH\b", re.IGNORECASE)
+_PASS_LINE_RE = re.compile(r"\bPASS(ED)?\b", re.IGNORECASE)
+_FIELD_RE = re.compile(r"([A-Za-z_]\w*)\s*=\s*([^,\s]+)")
+
+
+def _summarize_log(log: str, max_examples: int = 8) -> dict:
+    """Counts and groups pass/fail lines so the model sees the pattern, not
+    a cut-off tail. A `name = value` field that takes only a few distinct
+    values across the failures (an opcode, an expected constant) is reported
+    with its histogram, e.g. ctrl {5: 5, 6: 5, 7: 5}; operand-like fields
+    with many distinct values are left out as noise."""
+    lines = [line.strip() for line in log.splitlines() if line.strip()]
+    fails = [line for line in lines if _FAIL_LINE_RE.search(line)]
+    passes = [line for line in lines if _PASS_LINE_RE.search(line) and not _FAIL_LINE_RE.search(line)]
+
+    # Group only across failure lines that carry fields (a "FAIL: 3 checks"
+    # summary line has none), and only when there are several to compare.
+    field_lines = [
+        {key: value.rstrip(":;.)") for key, value in _FIELD_RE.findall(line)} for line in fails
+    ]
+    field_lines = [f for f in field_lines if f]
+    counts: dict[str, dict[str, int]] = {}
+    for fields in field_lines:
+        for key, value in fields.items():
+            counts.setdefault(key, {})
+            counts[key][value] = counts[key].get(value, 0) + 1
+    grouped = {
+        key: dict(sorted(vals.items(), key=lambda kv: -kv[1]))
+        for key, vals in counts.items()
+        if len(field_lines) > 1 and len(vals) <= 8 and sum(vals.values()) * 2 >= len(field_lines)
+    }
+    if fails:
+        pattern = "; ".join(
+            f"failures by {key}: {', '.join(f'{v} ({n}x)' for v, n in vals.items())}"
+            for key, vals in grouped.items()
+        )
+        headline = (
+            f"{len(fails)} failing line(s), {len(passes)} passing line(s)."
+            + (f" Pattern: {pattern}." if pattern else "")
+            + " The bug can be in the RTL or in the testbench's expected values; check both for these cases."
+        )
+    elif passes:
+        headline = f"All {len(passes)} checked line(s) passed."
+    else:
+        headline = "No PASS/FAIL lines found; see the log tail."
+    return {
+        "headline": headline,
+        "pass_lines": len(passes),
+        "fail_lines": len(fails),
+        "failure_fields": grouped,
+        "first_failures": fails[:max_examples],
+    }
+
+
 def testbench_runner(module_path: str, tb_path: str, timeout_s: int = 60) -> dict:
     """Compiles and runs a Verilog testbench with Icarus Verilog, returns
     pass/fail plus a short summary instead of the raw simulator log.
@@ -70,12 +128,16 @@ def testbench_runner(module_path: str, tb_path: str, timeout_s: int = 60) -> dic
 
         run_res = subprocess.run(["vvp", out_bin], capture_output=True, text=True, timeout=timeout_s)
     log = run_res.stdout + run_res.stderr
-    passed = bool(re.search(r"\bPASS(ED)?\b", log, re.IGNORECASE)) and not re.search(
-        r"\bFAIL(ED)?\b|\bERROR\b", log, re.IGNORECASE
-    )
+    summary = _summarize_log(log)
+    # Same line classification as the counts, so status and counts never disagree.
+    passed = summary["pass_lines"] > 0 and summary["fail_lines"] == 0
+    # A long raw tail drowns out the counts, so it's only sizeable when there
+    # was nothing to count.
+    tail_chars = 1500 if not (summary["pass_lines"] or summary["fail_lines"]) else 300
     return {
         "status": "pass" if passed else "fail_or_unknown",
-        "summary": log.strip()[-2000:],
+        **summary,
+        "summary": log.strip()[-tail_chars:],  # log tail
         "note": "Pass/fail is inferred from PASS/FAIL text in the log — make sure your testbench prints one.",
     }
 
@@ -122,23 +184,101 @@ _HAZARD_PATTERNS = [
 ]
 
 
-def hazard_sanity_checker(diff_text: str) -> dict:
-    """Scans a diff (added lines) for patterns that commonly indicate
-    unhandled data/control hazards in a pipelined core. Heuristic, not
-    exhaustive — flags things worth a closer look, not definitive bugs.
+# Lines touching forwarding / stall / flush / pipeline registers.
+_HAZARD_LOGIC_RE = re.compile(
+    r"\b(forward\w*|fwd\w*|bypass\w*|stall\w*|flush\w*|hazard\w*|bubble\w*|ex_mem\w*|mem_wb\w*|id_ex\w*|if_id\w*)\b",
+    re.IGNORECASE,
+)
+
+_HAZARD_REVIEW_PROMPT = """\
+You review diffs to pipelined CPU RTL for data and control hazards: forwarding \
+priority (the newest producer, EX/MEM, must win over MEM/WB), x0 never \
+forwarded, load-use stalls, branch/jump flushes, PC updates while stalled. \
+Report only problems visible in the diff. Respond with ONLY a JSON object: \
+{"verdict": "likely_hazard" | "no_hazard_found" | "unclear", \
+"findings": [{"line": "<diff line>", "issue": "<one sentence>", "severity": "high" | "medium" | "low"}]}
+"""
+
+
+def _norm(line: str) -> str:
+    line = re.sub(r"^\s*else\b", "", line.strip())
+    return " ".join(line.split())
+
+
+def _removed_hazard_logic(diff_text: str) -> list[str]:
+    """Removed lines touching hazard logic that don't come back among the
+    added lines of the same file (so pure re-indents or else-if reshuffles
+    aren't flagged, and logic re-added in another file doesn't hide it)."""
+    files: dict[str, tuple[list[str], set[str]]] = {}
+    current = ""
+    for l in diff_text.splitlines():
+        if l.startswith("+++ "):
+            current = l[4:].strip()
+            continue
+        if l.startswith("--- ") or l.startswith("diff --git"):
+            continue
+        removed, added = files.setdefault(current, ([], set()))
+        if l.startswith("-"):
+            removed.append(l[1:])
+        elif l.startswith("+"):
+            added.add(_norm(l[1:]))
+    flags = []
+    for removed, added in files.values():
+        for line in removed:
+            code = line.split("//", 1)[0]
+            if _HAZARD_LOGIC_RE.search(code) and _norm(code) and _norm(code) not in added:
+                flags.append(f"removed hazard-related logic: `{line.strip()}`")
+    return flags[:6]
+
+
+def _llm_hazard_review(diff_text: str) -> dict:
+    try:
+        response = get_client().chat.completions.create(
+            model=settings.nebius_model,
+            messages=[
+                {"role": "system", "content": _HAZARD_REVIEW_PROMPT},
+                {"role": "user", "content": diff_text[:12000]},
+            ],
+            response_format={"type": "json_object"},
+        )
+        review = json.loads(response.choices[0].message.content or "{}")
+        if not isinstance(review, dict):
+            raise ValueError("review is not a JSON object")
+    except Exception as exc:  # noqa: BLE001 - the rule-based result still stands
+        return {"status": "unavailable", "message": f"{type(exc).__name__}"}
+    findings = review.get("findings") if isinstance(review.get("findings"), list) else []
+    verdict = review.get("verdict") if review.get("verdict") in ("likely_hazard", "no_hazard_found", "unclear") else "unclear"
+    return {"status": "ok", "verdict": verdict, "findings": findings[:8]}
+
+
+def hazard_sanity_checker(diff_text: str, llm_review: bool = True) -> dict:
+    """Checks a diff for unhandled data/control hazards in a pipelined core:
+    pattern rules on added lines, a rule for removed forwarding/stall/flush
+    logic, and (unless llm_review=False) one hazard-focused Nemotron review.
+    Not proof either way — "no flags" means "simulate it", not "safe".
     """
-    added_lines = [l[1:] for l in diff_text.splitlines() if l.startswith("+") and not l.startswith("+++")]
-    added_text = "\n".join(added_lines)
+    added_text = "\n".join(
+        l[1:] for l in diff_text.splitlines() if l.startswith("+") and not l.startswith("+++")
+    )
+    flags = [desc for pattern, desc in _HAZARD_PATTERNS if pattern.search(added_text)]
+    flags += _removed_hazard_logic(diff_text)
 
-    hits = []
-    for pattern, description in _HAZARD_PATTERNS:
-        if pattern.search(added_text):
-            hits.append(description)
-
+    review = _llm_hazard_review(diff_text) if llm_review else {"status": "skipped"}
+    model_flagged = review.get("verdict") == "likely_hazard" or any(
+        isinstance(f, dict) and f.get("severity") in ("high", "medium") for f in review.get("findings", [])
+    )
+    if flags or model_flagged:
+        status = "flagged"
+    elif review.get("verdict") == "unclear":
+        status = "unclear_needs_simulation"
+    else:
+        status = "no_flags_needs_simulation"
     return {
-        "status": "flagged" if hits else "no_obvious_issues",
-        "flags": hits,
-        "note": "Heuristic scan only — always confirm with the testbench_runner skill.",
+        "status": status,
+        "flags": flags,
+        "model_review": review,
+        "note": "Rules plus a model review, not proof. No flags does NOT mean hazard-free: "
+        "confirm with testbench_runner.",
     }
 
 

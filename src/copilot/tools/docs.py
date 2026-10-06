@@ -11,6 +11,7 @@ from pathlib import Path
 from .. import memory
 from ..config import settings
 from ..llm import get_client
+from .rtl_files import module_interfaces
 
 # Matches mnemonic-looking tokens: e.g. ADD, ADDI, LW, custom.foo
 _MNEMONIC_RE = re.compile(r"\b[A-Z][A-Z0-9_.]{1,15}\b")
@@ -55,9 +56,19 @@ def isa_spec_cross_referencer(spec_path: str, rtl_dir: str) -> dict:
 
 def spec_drafting_assistant(project: str, section_hint: str) -> dict:
     """Drafts spec/README text for a project section, grounded in that
-    project's current status from memory.
+    project's status from memory and the real module interfaces from its
+    RTL (so signal names come from the code, not the model's imagination).
     """
     status = memory.get_status(project)
+    repo = settings.project_repo_paths.get(project)
+    interfaces, modules = ("", [])
+    if repo and Path(repo).is_dir():
+        interfaces, modules = module_interfaces(Path(repo), hint=section_hint)
+    rtl_block = (
+        f"RTL module interfaces (from the project's source files):\n{interfaces}"
+        if interfaces
+        else "No RTL source is available for this project, so do not name any modules or signals."
+    )
     client = get_client()
     response = client.chat.completions.create(
         model=settings.nebius_model,
@@ -65,16 +76,25 @@ def spec_drafting_assistant(project: str, section_hint: str) -> dict:
             {
                 "role": "system",
                 "content": "You draft concise, technically precise hardware design spec/README sections. "
-                "Match the terse, factual tone of an engineer's own notes, not marketing copy.",
+                "Match the terse, factual tone of an engineer's own notes, not marketing copy. "
+                "Name only modules and signals that appear in the RTL interface list you are given. "
+                "If a detail is not supported by the status or the RTL list, write 'TBD' instead of inventing it.",
             },
             {
                 "role": "user",
-                "content": f"Project: {project}\nCurrent status:\n{status}\n\n"
+                "content": f"Project: {project}\nCurrent status:\n{status}\n\n{rtl_block}\n\n"
                 f"Draft the following section: {section_hint}",
             },
         ],
     )
-    return {"status": "ok", "draft": response.choices[0].message.content or ""}
+    return {
+        "status": "ok",
+        "draft": response.choices[0].message.content or "",
+        "grounded_on_modules": modules,
+        "note": "Signal names should come from the listed RTL modules; check anything marked TBD."
+        if modules
+        else "No RTL found for this project; draft is based on the memory status only.",
+    }
 
 
 def changelog_generator(repo_path: str, since: str = "1.week") -> dict:

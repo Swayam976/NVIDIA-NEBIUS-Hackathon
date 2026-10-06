@@ -15,10 +15,31 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
 | 10 | apply_diff gate: fail closed with no confirm handler; prompt shows real diff | Claude | done |
-| 11 | Live audit of all 16 skills via CLI (RISC-V files), report + ranked fixes | Claude | in review (fixes await Swayam's go-ahead) |
+| 11 | Live audit of all 16 skills via CLI (RISC-V files), report + ranked fixes | Claude | done |
+| 12 | Audit fixes 1-4: testbench summary, hazard checker, grounded spec drafts, git-skill errors + mtime fallback | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 12 done (audit fixes 1-4). testbench_runner:
+  headline + pass/fail counts + failure-field grouping (real ALU_tb: 70/30,
+  ctrl 5/6/7), neutral RTL-vs-testbench hint, status derived from counts.
+  hazard_sanity_checker: rule for removed forwarding/stall/flush logic (per
+  file) + one Nemotron JSON review; "no flags" now reads "needs simulation".
+  spec_drafting_assistant: prompt carries real module interfaces from the
+  project RTL (tools/rtl_files.py; skips Vivado generated dirs, testbenches,
+  task args) and must write TBD instead of inventing names. Git skills:
+  errors surfaced (commit_to_summary no longer says "no commits" on a
+  non-git dir); regression_spotter falls back to file mtimes for non-git
+  folders and excludes testbenches/generated files in both modes. Live CLI
+  recheck: all four now give correct answers on the RISC-V files.
+  New check: tests/test_skills.py. Codex round 1: non-object JSON review,
+  status/count mismatch (fixed). Round 2: task args as ports, cross-file
+  masking in hazard rule, budget break (fixed). 2 rounds used.
+  Incident: at 12:17 this checkout was switched to codex-work (task 4) while
+  task 12 was uncommitted; nothing mixed (Codex committed only its files).
+  Per Swayam: task 12 moved back to main via stash; codex-work now has its
+  own worktree at ../hw-copilot-codex (CLAUDE.md/AGENTS.md assumed one).
 
 - 2026-10-06, Claude, task 11 audit (14 real CLI sessions, Nemotron via
   Token Factory, RISC-V files; memory/pending store on temp copies; NPU N/A,

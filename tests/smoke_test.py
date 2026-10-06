@@ -62,7 +62,7 @@ print("daily_brief: OK, covers", list(brief["projects"].keys()))
 
 # --- hazard_sanity_checker heuristic ---
 fake_diff = "+  PC <= PC + 4;\n+  // no stall check here\n"
-hazard_result = TOOL_IMPLS["hazard_sanity_checker"](diff_text=fake_diff)
+hazard_result = TOOL_IMPLS["hazard_sanity_checker"](diff_text=fake_diff, llm_review=False)  # no network here
 print("hazard_sanity_checker: OK ->", hazard_result["status"], hazard_result["flags"])
 
 # --- agent loop with a mocked LLM client: simulate one tool call then a final answer ---
