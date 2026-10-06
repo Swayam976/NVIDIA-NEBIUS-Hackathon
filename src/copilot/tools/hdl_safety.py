@@ -60,6 +60,8 @@ _STRING_FULL_RE = re.compile(rf"\s*{_STRING}\s*")
 # System tasks that take a file path; the first group can also create/overwrite one.
 _WRITE_PATH_TASKS = frozenset({"fopen", "writememh", "writememb", "dumpfile", "dumpports", "fdumpports"})
 _PATH_TASKS = _WRITE_PATH_TASKS | {"readmemh", "readmemb", "sdf_annotate"}
+_PROCESS_TASKS = frozenset({"system"})
+_LEAVES_RUN_DIR_RE = re.compile(r'^(?:[A-Za-z]:|[\\/]|~)|(?:^|[\\/])\.\.(?:[\\/]|$)')
 
 
 def strip_comments(text: str) -> str:
@@ -109,6 +111,18 @@ def _split_top(args: str) -> list[str]:
     return [*parts, cur]
 
 
+def _normalise(args: str) -> str:
+    """Whitespace collapsed OUTSIDE string literals only: "a  b.txt" and
+    "a b.txt" are different paths and stay different."""
+    out, pos = [], 0
+    for m in re.finditer(_STRING, args):
+        out.append(" ".join(args[pos:m.start()].split()))
+        out.append(m.group(0))
+        pos = m.end()
+    out.append(" ".join(args[pos:].split()))
+    return "".join(out)
+
+
 def access_features(text: str) -> Counter:
     """Every construct in the code (comments ignored) that could reach a
     file or process, keyed with its WHOLE argument list (whitespace
@@ -124,7 +138,7 @@ def access_features(text: str) -> Counter:
         if name in ALLOWED_SYSTEM_TASKS or name in _PURE_SV_FUNCTIONS:
             continue
         if m.group(2):
-            found[f"${name}({' '.join(_call_args(code, m.end()).split())})"] += 1
+            found[f"${name}({_normalise(_call_args(code, m.end()))})"] += 1
         else:
             found[f"${name}"] += 1
     for name, arg in _DIRECTIVE_CALL_RE.findall(code):
@@ -152,6 +166,22 @@ def _path_is_literal(key: str) -> bool:
 
 def _task(key: str) -> str:
     return key[1:].split("(")[0] if key.startswith("$") else ""
+
+
+def escaping_access(features: Counter) -> list[str]:
+    """Process calls, and file writes whose literal path leaves the
+    simulation's run folder (absolute, drive, home or ".." paths): code that
+    would act on this machine outside the throwaway directory."""
+    found = []
+    for k in features:
+        task = _task(k)
+        if task in _PROCESS_TASKS:
+            found.append(k)
+        elif task in _WRITE_PATH_TASKS and _path_is_literal(k):
+            path = _split_top(k[k.index("(") + 1: -1])[0].strip()[1:-1]
+            if _LEAVES_RUN_DIR_RE.search(path):
+                found.append(k)
+    return sorted(found)
 
 
 def nonliteral_writes(features: Counter) -> list[str]:

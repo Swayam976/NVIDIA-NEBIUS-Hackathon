@@ -189,6 +189,8 @@ def check_hdl_sources(paths: list[Path], timeout_s: int = 20) -> str | None:
         )
         if res.returncode != 0 or not out.exists():
             return "Preprocessing failed; fix the source first."
+        if out.stat().st_size > 16 * 1024 * 1024:
+            return "The sources expand to more than 16 MB after preprocessing; not run in the demo."
         expanded = out.read_text(encoding="utf-8", errors="replace")
     for task in _SYSTASK_RE.findall(expanded):
         if task not in ALLOWED_SYSTEM_TASKS:

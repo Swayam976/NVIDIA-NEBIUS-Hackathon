@@ -135,6 +135,7 @@ def propose_edit(module_path: str, instruction: str) -> dict:
         return {"status": "error", "message": f"Model did not return valid edit JSON: {exc}"}
     if not isinstance(new_content, str):
         return {"status": "error", "message": "Model did not return the new file content as text."}
+    new_content = new_content.replace("\r\n", "\n")  # line endings are the file's own, see _encoded
     if not _WHITESPACE_ASK_RE.search(instruction):
         new_content = _keep_original_whitespace(original, new_content)
 
@@ -166,12 +167,23 @@ def stage_pending(files: list[tuple[str, str]]) -> str:
     are one change: approved and applied all together or not at all."""
     diff_id = uuid.uuid4().hex[:8]
     pending = _load_pending()
+    files = [(p, c.replace("\r\n", "\n")) for p, c in files]
     if len(files) == 1:
         pending[diff_id] = {"module_path": files[0][0], "new_content": files[0][1]}
     else:
         pending[diff_id] = {"files": [{"module_path": p, "new_content": c} for p, c in files]}
     _save_pending(pending)
     return diff_id
+
+
+def _encoded(new_content: str, original: bytes | None) -> bytes:
+    """The approved text as bytes, in the target's own line-ending style
+    (CRLF if the file used it), translated exactly once: what is written is
+    the approved content, never with extra line breaks."""
+    text = new_content.replace("\r\n", "\n")
+    if original is not None and b"\r\n" in original:
+        text = text.replace("\n", "\r\n")
+    return text.encode("utf-8")
 
 
 def _entry_files(entry: dict) -> list[tuple[str, str]]:
@@ -283,9 +295,9 @@ def apply_diff(diff_id: str) -> dict:
         return {"status": "error", "message": f"Could not read a target file ({exc}). Nothing was written."}
     attempted = 0
     try:
-        for (path, new_content), _ in zip(files, originals):
+        for (path, new_content), (_, original) in zip(files, originals):
             attempted += 1  # counted before the write: a failed write may still have truncated the file
-            Path(path).write_text(new_content, encoding="utf-8")
+            Path(path).write_bytes(_encoded(new_content, original))
     except OSError as exc:
         # All or nothing: restore every file touched, including the one that failed.
         not_restored = []

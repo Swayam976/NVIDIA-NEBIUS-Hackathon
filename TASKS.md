@@ -22,10 +22,33 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 15 | New skill: debug_failing_test (run tb, locate first mismatch in VCD, root cause, fix as pending diff) | Claude | done |
 | 16 | New skill: testbench_auditor (expected-value model vs RTL/spec, report only) | Claude | done |
 | 17 | New skill: verify_loop (closed loop: change -> test -> debug in a temp copy, max 3 rounds, one gated diff) | Claude | done |
-| 18 | Whole-copilot Codex review x3 + fixes | Claude | in progress (Claude) |
+| 18 | Whole-copilot Codex review x3 + fixes | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 18 done (whole-copilot Codex review, round 3 of 3):
+  8 findings, all fixed. (1, blocking) apply_diff wrote CRLF proposals as
+  CR CR LF on Windows: proposals are LF-normalised before they are shown,
+  and the approved text is written as bytes once, in the target file's own
+  line-ending style. (2, blocking) argument normalisation collapsed spaces
+  inside path literals: whitespace is normalised outside strings only. (3,
+  blocking) flipping a condition around an existing absolute-path write or
+  $system passed the guard: hdl_safety.escaping_access (process calls,
+  writes to absolute/drive/home/".." paths) blocks every run the loop
+  makes, baseline included; the user's own testbenches that do so are
+  listed under testbenches_not_run and never run by the loop. (4)
+  preprocessor output capped at 16 MB (sandbox check + loop guard). (5)
+  lint_checker returns every %Error separately (display list stays capped
+  at 50). (6) lint that can't run on an edited file -> verification
+  "partial", lint_not_run. (7) the target and every testbench the loop
+  edits always run; the cap only drops indirect ones. (8) auditor replies
+  without a findings list count as an unavailable review (partial).
+  Residual risk, stated once by Codex and accepted for now: the loop's
+  protection is static analysis, not an OS sandbox (none portable on
+  Windows); rules are deliberately strict and stop the loop when unsure.
+  After all 3 rounds: 12 suites pass; live RISC-V ALU loop unchanged
+  (passed in 2 rounds, 4 calls, files byte-identical).
 
 - 2026-10-06, Claude, task 18 (whole-copilot Codex review, round 2 of 3):
   7 findings, all fixed. (1+2, blocking) the loop's HDL keys ignored the

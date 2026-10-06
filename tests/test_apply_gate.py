@@ -143,15 +143,15 @@ try:
     print("crashing confirm handler -> declined: OK")
 
     # 10. Approved but the write fails: proposal kept, approval cleared.
-    _real_write_text = Path.write_text
+    _real_write_bytes = Path.write_bytes  # apply_diff writes the approved bytes
 
     def target_is_read_only(self, *args, **kwargs):
         if self == target:
             raise PermissionError("read-only")
-        return _real_write_text(self, *args, **kwargs)
+        return _real_write_bytes(self, *args, **kwargs)
 
     with mock.patch("builtins.input", return_value="y"), redirect_stdout(io.StringIO()), mock.patch.object(
-        Path, "write_text", target_is_read_only
+        Path, "write_bytes", target_is_read_only
     ):
         tool_result = run(diff_id, confirm=cli.confirm_tool_call)
     assert '"error"' in tool_result and target.read_text(encoding="utf-8") == ORIGINAL, tool_result

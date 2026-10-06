@@ -85,6 +85,10 @@ assert [f["line"] for f in r["findings"]] == [47, 48, 49] and "unavailable" in r
 # Full review: without the model only the rule ran, so coverage is partial, not "complete".
 assert r["coverage"] == "partial" and r["expected_values_found"] == 11 and r["expected_values_checked"] == 0, r
 assert "only the shift-amount rule ran" in r["summary"], r["summary"]
+# Review round 3: a reply without a findings list is not a clean review.
+for bad in ("{}", '{"findings": null}'):
+    r, _ = audit([bad])
+    assert r["coverage"] == "partial" and r["expected_values_checked"] == 0 and r["model_review"], (bad, r)
 r, calls = audit([RuntimeError("cut off"), json.dumps({"findings": []})])
 assert len(calls) == 2 and calls[1]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
 print("testbench_auditor: outage keeps rule findings; one retry without reasoning: OK")

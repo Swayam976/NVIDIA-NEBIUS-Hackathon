@@ -459,6 +459,8 @@ def lint_checker(file_path: str, timeout_s: int = 30) -> dict:
         "status": "clean" if not warnings else "issues_found",
         "warning_count": len(warnings),
         "warnings": warnings[:50],
+        # Every error, not just those in the first 50 lines (verify_loop compares them).
+        "errors": [w for w in warnings if w.startswith("%Error")][:5000],
     }
 
 

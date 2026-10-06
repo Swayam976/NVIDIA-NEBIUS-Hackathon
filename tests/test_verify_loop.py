@@ -228,22 +228,24 @@ try:
     # too (exact original bytes); a failed restore is reported, never hidden.
     a.write_bytes(ALU.encode() + b"\r\n// crlf tail\r\n")
     a_bytes, b_bytes = a.read_bytes(), b.read_bytes()
-    real_write_text = Path.write_text
-
-    def partial_then_fail(self, data, *args, **kw):
-        if self.name == "alu_tb.v":
-            real_write_text(self, data[:10], *args, **kw)
-            raise OSError("disk full")
-        return real_write_text(self, data, *args, **kw)
+    real_write_bytes = Path.write_bytes
 
     for restore_fails in (False, True):
         _, fp = module_modifier.preview_pending_diff(diff_id)
         module_modifier.approve_pending_diff(diff_id, fp)
-        real_write_bytes = Path.write_bytes
-        broken_restore = (lambda self, data: (_ for _ in ()).throw(OSError("still full"))
-                          if self.name == "alu_tb.v" else real_write_bytes(self, data))
-        with mock.patch.object(Path, "write_text", partial_then_fail), \
-             mock.patch.object(Path, "write_bytes", broken_restore if restore_fails else real_write_bytes):
+        tb_writes = []
+
+        def flaky_write(self, data):
+            if self.name == "alu_tb.v":
+                tb_writes.append(data)
+                if len(tb_writes) == 1:  # the apply: truncates the file, then fails
+                    real_write_bytes(self, data[:10])
+                    raise OSError("disk full")
+                if restore_fails:  # the rollback of that file
+                    raise OSError("still full")
+            return real_write_bytes(self, data)
+
+        with mock.patch.object(Path, "write_bytes", flaky_write):
             res = module_modifier.apply_diff(diff_id)
         assert res["status"] == "error" and a.read_bytes() == a_bytes, res
         if restore_fails:
@@ -251,6 +253,17 @@ try:
         else:
             assert b.read_bytes() == b_bytes and "nothing applied" in res["message"], res
     print("verify_loop: multi-file apply is all-or-nothing (rollback incl. a truncated file; failed restore reported): OK")
+    # Review round 3: the approved text is written once, in the file's own
+    # line-ending style: no CR CR LF, no line breaks the diff didn't show.
+    a.write_bytes(ALU.replace("\n", "\r\n").encode())       # a CRLF file...
+    b.write_bytes(ALU_TB.encode())                          # ...and an LF file
+    diff_id = module_modifier.stage_pending([(str(a), GOOD.replace("\n", "\r\n")), (str(b), ALU_TB_NEW)])
+    diff_text, fp = module_modifier.preview_pending_diff(diff_id)
+    assert "\r" not in diff_text, "CRLF proposals are normalised before they are shown"
+    module_modifier.approve_pending_diff(diff_id, fp)
+    assert module_modifier.apply_diff(diff_id)["status"] == "ok"
+    assert a.read_bytes() == GOOD.replace("\n", "\r\n").encode() and b.read_bytes() == ALU_TB_NEW.encode()
+    print("verify_loop: applied text written exactly once, keeping each file's line endings: OK")
 
     # --- 2. needs a debug round ---
     root = project("p2")
@@ -322,10 +335,10 @@ try:
     assert new_risky_features("", "`define include x\n") and new_risky_features("", "$`T(1);")
     assert new_risky_features("", "assert property ($past(x) |-> $rose(y));") == [], "pure SV functions allowed"
     # Full review: uncommenting an existing call is new access.
-    assert new_risky_features('// f = $fopen("o.txt", "w");\n', 'f = $fopen("o.txt", "w");\n') == ['$fopen("o.txt", "w")']
+    assert new_risky_features('// f = $fopen("o.txt", "w");\n', 'f = $fopen("o.txt", "w");\n') == ['$fopen("o.txt","w")']
     # Review round 2: the whole call is the key, so a new mode or a built-up path is new access.
-    assert new_risky_features('f = $fopen("o.txt", "r");', 'f = $fopen("o.txt", "w");') == ['$fopen("o.txt", "w")']
-    assert new_risky_features('$readmemh(MEM, m);', '$readmemh({"C:", "/x"}, m);') == ['$readmemh({"C:", "/x"}, m)']
+    assert new_risky_features('f = $fopen("o.txt", "r");', 'f = $fopen("o.txt", "w");') == ['$fopen("o.txt","w")']
+    assert new_risky_features('$readmemh(MEM, m);', '$readmemh({"C:", "/x"}, m);') == ['$readmemh({"C:","/x"}, m)']
     # The simulation guard: compares preprocessed inputs with the originals.
     g = work / "guard"
     for sub in ("project", "original"):
@@ -344,7 +357,7 @@ try:
     gc.write(g / "project" / "m.v", '`include "defs.vh"\nmodule m; integer f; initial f = `LOG("C:/x.txt"); endmodule\n')
     assert vl_mod.new_risky_features('`include "defs.vh"\n', (g / "project/m.v").read_text()) == [], "raw check misses it"
     reason = guard([(g / "project" / "m.v").resolve()])
-    assert reason and '$fopen("C:/x.txt", "w")' in reason, reason
+    assert reason and '$fopen("C:/x.txt","w")' in reason, reason
     # (b) an edited design that writes through a non-literal path is not run.
     gc.edited.clear()
     gc.write(g / "project" / "w.v", (g / "original/w.v").read_text() + "// touched\n")
@@ -419,6 +432,36 @@ try:
         r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
     assert r["status"] == "blocked" and "lint alu.v: nope" in r["message"] and r["pending_diff"] is None, r
     print("verify_loop: new lint errors are fixed before 'passed'; old/moved ones ignored; blocked lint stops: OK")
+
+    # --- review round 3 ---
+    # Spaces inside a path literal are significant.
+    assert new_risky_features('$fopen("a  b.txt");', '$fopen("a b.txt");') == ['$fopen("a b.txt")']
+    # Enabling an existing branch that writes outside the run folder: refused,
+    # and the user's own testbench that does so is never run by the loop.
+    from src.copilot.tools.hdl_safety import access_features, escaping_access  # noqa: E402
+    assert escaping_access(access_features('if (1) f = $fopen("C:/Users/me/notes.txt", "w"); $system("x");')) == \
+        ['$fopen("C:/Users/me/notes.txt","w")', '$system("x")']
+    assert escaping_access(access_features('f = $fopen("run.log", "w"); $readmemh("C:/p.hex", m);')) == []
+    root = project("p_escape")
+    (root / "sim/top_tb.v").write_text(FILES["sim/top_tb.v"].replace(
+        "  initial begin", '  integer f;\n  initial begin\n    if (0) f = $fopen("C:/Users/me/notes.txt", "w");'),
+        encoding="utf-8")
+    r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
+    assert r["status"] == "passed" and "sim/top_tb.v" not in r["testbenches"], r
+    assert "writes outside the simulation folder" in r["testbenches_not_run"]["sim/top_tb.v"], r
+    assert r["verification"] == "partial", r
+    # Testbenches the loop edits always run, whatever the testbench cap.
+    root = project("p_cap")
+    with mock.patch.object(vl_mod, "_MAX_TESTBENCHES", 1):
+        r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
+    assert r["testbenches"] == ["sim/alu_tb.v", "sim/alu2_tb.v"], r["testbenches"]
+    assert r["testbenches_not_run"] == {"sim/top_tb.v": "over the testbench limit"}, r
+    # Lint that can't run on an edited file: no "complete" verification.
+    root = project("p_nolint")
+    with mock.patch.object(vl_mod, "_lint", side_effect=lambda path, cc: {"unavailable": "unavailable"}):
+        r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
+    assert r["status"] == "passed" and r["verification"] == "partial" and r["lint_not_run"] == {"rtl/alu.v": "unavailable"}
+    print("verify_loop: path spaces kept, out-of-folder writes never run, edited tbs always run, lint gaps reported: OK")
 
     # --- no change from the model -> nothing staged ---
     root = project("p_none")

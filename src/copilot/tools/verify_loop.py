@@ -26,7 +26,7 @@ from typing import Callable
 
 from ..llm import count_model_calls
 from .debugging import diagnose_failure
-from .hdl_safety import access_features, new_risky_features, nonliteral_paths
+from .hdl_safety import access_features, escaping_access, new_risky_features, nonliteral_paths
 from .module_modifier import propose_edit, stage_pending, unified_diff_text
 from .rtl_files import _DEF_RE, _instantiates, _read_code, design_files, is_testbench, project_files
 from .verification import _tool_available, _vivado_mem_init_dirs, lint_checker, testbench_runner
@@ -37,6 +37,7 @@ _MAX_TESTBENCHES = 8  # testbenches run per round
 _COPY_MAX_FILES = 3000
 _COPY_MAX_BYTES = 50 * 1024 * 1024
 _DIFF_IN_PROMPT = 6000
+_PREPROCESSED_MAX_BYTES = 16 * 1024 * 1024
 
 _RTL_INSTRUCTION = (
     "Design goal: {goal}\n"
@@ -146,8 +147,8 @@ def _expand(paths: list[Path]) -> str | None:
                                  capture_output=True, text=True, timeout=30, cwd=d)
         except (OSError, subprocess.TimeoutExpired):
             return None
-        if res.returncode != 0 or not out.is_file():
-            return None
+        if res.returncode != 0 or not out.is_file() or out.stat().st_size > _PREPROCESSED_MAX_BYTES:
+            return None  # failed, or macros blew up: callers treat None as "don't run"
         return out.read_text(encoding="utf-8", errors="replace")
 
 
@@ -167,16 +168,22 @@ def _sim_guard(copy: _Copy, original_root: Path, outer):
     def check(files: list[Path]) -> str | None:
         if outer is not None and (reason := outer(files)):
             return reason
+        read = lambda ps: "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in ps if f.is_file())  # noqa: E731
+        new_paths = [Path(f).resolve() for f in files]
+        new_x, new_raw = _expand(new_paths), read(new_paths)
+        if new_x is None and copy.edited:
+            return "The changed sources could not be preprocessed, so they were not simulated unreviewed."
+        new_f = access_features(new_x if new_x is not None else new_raw) + access_features(new_raw)
+        # Always, even for the user's unchanged code: the loop runs testbenches on
+        # its own, so nothing it runs may write outside its throwaway run folder or
+        # start a process (an edit could also just enable such a branch).
+        if escaping := escaping_access(new_f):
+            return (f"This design writes outside the simulation folder or runs a process "
+                    f"({', '.join(escaping[:3])}), so the loop does not run it.")
         if not copy.edited:
             return None  # the user's own, unchanged code
-        new_paths = [Path(f).resolve() for f in files]
         old_paths = [original_of(f) for f in new_paths]
-        new_x, old_x = _expand(new_paths), _expand(old_paths)
-        if new_x is None:
-            return "The changed sources could not be preprocessed, so they were not simulated unreviewed."
-        read = lambda ps: "\n".join(f.read_text(encoding="utf-8", errors="replace") for f in ps if f.is_file())  # noqa: E731
-        new_raw, old_raw = read(new_paths), read(old_paths)
-        new_f = access_features(new_x) + access_features(new_raw)
+        old_x, old_raw = _expand(old_paths), read(old_paths)
         old_f = access_features(old_x if old_x is not None else old_raw) + access_features(old_raw)
         if added := sorted((new_f - old_f).keys()):
             return (f"The loop's edits add file/process access ({', '.join(added[:4])}); "
@@ -257,9 +264,9 @@ def _lint(path: Path, compile_check) -> dict:
         return {"blocked": reason}
     res = lint_checker(str(path))
     if res.get("status") in ("clean", "issues_found"):
-        found = res.get("warnings", [])
-        errors = [w for w in found if w.startswith("%Error")]
-        return {"warnings": len(found) - len(errors), "errors": errors}
+        # lint_checker lists every error separately; "warnings" is capped for display.
+        errors = res.get("errors", [w for w in res.get("warnings", []) if w.startswith("%Error")])
+        return {"warnings": res.get("warning_count", 0) - len(errors), "errors": errors}
     return {"unavailable": str(res.get("status"))}
 
 
@@ -390,8 +397,12 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         return {"status": "error", "message": "module_path or tb_path sits in a generated folder that is not copied."}
 
     tests, direct = _affected_testbenches(copy, t_module, t_tb)
-    not_run = tests[_MAX_TESTBENCHES:]
-    tests = tests[:_MAX_TESTBENCHES]
+    # The target and every testbench the loop may edit always run; the cap
+    # only drops other (indirect) testbenches.
+    first = list(dict.fromkeys([t_tb, *direct[:_MAX_TB_EDITS]]))
+    rest = [t for t in tests if t not in first]
+    tests = first + rest[:max(0, _MAX_TESTBENCHES - len(first))]
+    not_run = {t: "over the testbench limit" for t in rest[max(0, _MAX_TESTBENCHES - len(first)):]}
 
     def run_all() -> dict[Path, dict]:
         return {t: testbench_runner(tb_path=str(t), rtl_dir=str(t_rtl), compile_check=compile_check,
@@ -401,6 +412,12 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
     if baseline[t_tb].get("status") in ("unavailable", "blocked", "ambiguous_design", "error"):
         return {"status": "not_runnable", "message": copy.untemp(baseline[t_tb].get("message", baseline[t_tb]["status"])),
                 "testbench_status": baseline[t_tb]["status"], "pending_diff": None}
+    for t in [t for t in tests if baseline[t].get("status") == "blocked"]:
+        # The user's own testbench writes outside the run folder: never run it again.
+        not_run[t] = copy.untemp(baseline[t].get("message", "blocked"))
+        tests.remove(t)
+        if t in direct:
+            direct.remove(t)
     # Done = the target testbench passes, nothing that passed before breaks,
     # and every testbench the loop itself edited passes.
     must_pass = [t_tb] + [t for t in tests[1:] if baseline[t].get("status") == "pass"]
@@ -550,6 +567,9 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
 
     rounds = len(attempts)
     final = "passed" if status == "passed" else f"still failing after {rounds} round(s)"
+    # Lint that could not run on an edited file in the last round: not verified.
+    lint_missing = {copy.rel(p): r.get("unavailable") for p, r in lint_now.items() if "unavailable" in r} \
+        if attempts else {}
     # Affected testbenches that never passed and weren't edited: not verified.
     unverified = {copy.rel(t): _verdict(runs[t]) for t in tests
                   if t not in must_pass and t not in copy.edited and runs[t].get("status") != "pass"} if attempts else {}
@@ -569,10 +589,11 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         "testbenches": [copy.rel(t) for t in tests],
         "testbenches_updated": [copy.rel(t) for t in tb_changed],
         **({"testbenches_not_updated": [copy.rel(t) for t in tb_skipped]} if tb_skipped else {}),
-        **({"testbenches_not_run": [copy.rel(t) for t in not_run]} if not_run else {}),
+        **({"testbenches_not_run": {copy.rel(t): why for t, why in not_run.items()}} if not_run else {}),
         "baseline": {copy.rel(t): _verdict(r) for t, r in baseline.items()},
-        "verification": "partial" if unverified or not_run else "complete",
+        "verification": "partial" if unverified or not_run or lint_missing else "complete",
         **({"unverified": unverified} if unverified else {}),
+        **({"lint_not_run": lint_missing} if lint_missing else {}),
         "attempts": attempts,
         "attempts_table": _table(attempts),
         **({"stopped_early": stop_reason} if stop_reason else {}),

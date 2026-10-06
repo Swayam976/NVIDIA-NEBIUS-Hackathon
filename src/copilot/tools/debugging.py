@@ -440,7 +440,9 @@ def testbench_auditor(tb_path: str, module_path: str = "", rtl_dir: str = "", sp
             {"role": "system", "content": _AUDIT_PROMPT},
             {"role": "user", "content": f"Expected-value computations in {tb.name}:\n{listing}\n\nSource files:\n{sources}"},
         ])
-        items = review.get("findings") if isinstance(review.get("findings"), list) else []
+        items = review.get("findings")
+        if not isinstance(items, list):  # {} or {"findings": null} is not a review
+            raise ValueError("reply has no findings list")
     except Exception as exc:  # noqa: BLE001 - the rule findings still stand
         items, model_note = [], f"model review unavailable ({type(exc).__name__}); rule checks only"
     by_id = {e["id"]: e for e in expected}
