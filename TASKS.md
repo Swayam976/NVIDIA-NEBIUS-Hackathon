@@ -10,7 +10,7 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 3 | Install iverilog + verilator, confirm testbench_runner / lint_checker work | Claude | done |
 | 4 | Unit tests for memory.py | Codex (codex-work) | todo |
 | 5 | Real modify -> diff -> approve -> apply loop on one small GEMM change | Claude | todo |
-| 6 | GitHub Actions cron for daily_brief via Token Factory (key in Actions secrets) | Claude | in progress (Claude) |
+| 6 | GitHub Actions cron for daily_brief via Token Factory (key in Actions secrets) | Claude | done |
 | 7 | Free demo hosting on Streamlit Community Cloud (sample RTL, password + request cap) | Claude | done |
 | 8 | README polish, demo script, Devpost write-up | Swayam + Claude | todo |
 | 9 | Record <=3 min demo video | Swayam | todo |
@@ -18,6 +18,11 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, task 6 done: manual run 37424187039 on a18e5e1 succeeded
+  (confirmed via GitHub API), brief in the run summary. Scheduled daily at
+  02:30 UTC / 08:00 IST from now on. Watch the first scheduled run after
+  2026-10-19 (ubuntu-latest -> Ubuntu 26 migration notice).
 
 - 2026-10-06, Claude, task 6 first CI run (manual) failed in "Write brief":
   APIConnectionError "Connection error." Reproduced locally with a dummy
