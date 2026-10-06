@@ -45,7 +45,7 @@ src/copilot/
   config.py      - env/config loading
   memory.py      - reads/writes memory/projects/*.md
   llm.py         - Nemotron client + tool-calling loop
-  tools/         - the 18 skills, as callable tools with JSON schemas
+  tools/         - the 19 skills, as callable tools with JSON schemas
   cli.py         - REPL entrypoint
 memory/projects/ - one markdown file per hardware project (persistent state)
 ```
@@ -72,6 +72,7 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 | `daily_brief` | Rolls up status/blockers across all tracked projects |
 | `debug_failing_test` | Runs a failing testbench, finds the first mismatch in the waveform, names the root cause (file:line, confidence) and proposes a fix as a pending diff for `apply_diff` |
 | `testbench_auditor` | Checks every expected-value computation in a testbench against the RTL (and spec); reports mismatches with file:line, changes nothing |
+| `verify_loop` | Closed loop for one change: in a temp copy, edits the RTL and the testbenches that use it, runs every affected testbench plus lint, debugs and fixes failures (max 3 rounds), then hands ONE combined diff to `apply_diff` — your files are untouched until you say yes |
 
 ## Web demo
 

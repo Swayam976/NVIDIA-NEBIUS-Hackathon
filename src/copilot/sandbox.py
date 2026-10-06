@@ -33,6 +33,9 @@ from typing import Callable, Iterator
 
 from . import memory
 from .tools import TOOL_IMPLS, TOOL_SCHEMAS, module_modifier
+from .tools.hdl_safety import (  # noqa: F401 - ALLOWED_SYSTEM_TASKS re-exported
+    ALLOWED_DIRECTIVES, ALLOWED_SYSTEM_TASKS, DEFINE_RE, DIRECTIVE_RE, RESERVED_DIRECTIVES, SYSTASK_RE,
+)
 
 # ---------------------------------------------------------------- workspace
 
@@ -128,36 +131,10 @@ def activate(ws: Workspace) -> Iterator[None]:
 
 # ------------------------------------------------------------- HDL checks
 
-# System tasks/functions with no file or process access.
-ALLOWED_SYSTEM_TASKS = frozenset(
-    {
-        "display", "displayb", "displayh", "displayo",
-        "write", "writeb", "writeh", "writeo",
-        "strobe", "monitor", "monitoron", "monitoroff",
-        "finish", "stop", "time", "stime", "realtime", "timeformat", "printtimescale",
-        "random", "urandom", "urandom_range", "dist_uniform",
-        "signed", "unsigned", "clog2", "bits", "size",
-        "itor", "rtoi", "bitstoreal", "realtobits",
-        "error", "warning", "info", "fatal",
-        "sformat", "sformatf", "test$plusargs", "value$plusargs",
-    }
-)
-# Directives that can't pull in files or build tokens.
-_ALLOWED_DIRECTIVES = frozenset(
-    {
-        "timescale", "define", "undef", "ifdef", "ifndef", "elsif", "else", "endif",
-        "default_nettype", "resetall", "celldefine", "endcelldefine",
-    }
-)
-# Directive names a user macro may never take (`define include ... would
-# otherwise make a later real `include look like a macro use).
-_RESERVED_DIRECTIVES = _ALLOWED_DIRECTIVES | {
-    "include", "line", "pragma", "begin_keywords", "end_keywords", "undefineall",
-    "unconnected_drive", "nounconnected_drive", "protect", "endprotect", "__FILE__", "__LINE__",
-}
-_DEFINE_RE = re.compile(r"`\s*define\s+([A-Za-z_]\w*)")
-_DIRECTIVE_RE = re.compile(r"`\s*([A-Za-z_]\w*)")
-_SYSTASK_RE = re.compile(r"\$([A-Za-z_][\w$]*)")
+# The allowlists live in tools/hdl_safety.py (shared with verify_loop).
+_ALLOWED_DIRECTIVES = ALLOWED_DIRECTIVES
+_RESERVED_DIRECTIVES = RESERVED_DIRECTIVES
+_DEFINE_RE, _DIRECTIVE_RE, _SYSTASK_RE = DEFINE_RE, DIRECTIVE_RE, SYSTASK_RE
 
 
 def check_hdl_sources(paths: list[Path], timeout_s: int = 20) -> str | None:
@@ -212,7 +189,7 @@ def check_hdl_sources(paths: list[Path], timeout_s: int = 20) -> str | None:
 
 # ------------------------------------------------------------ guarded tools
 
-_PATH_ARGS = {"module_path", "tb_path", "file_path", "vcd_path", "spec_path", "rtl_dir", "repo_path"}
+_PATH_ARGS = {"module_path", "tb_path", "file_path", "vcd_path", "spec_path", "rtl_dir", "repo_path", "project_dir"}
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _HDL_CHECKED = {"lint_checker": ("file_path",)}  # testbench_runner: whole workspace, see below
 # Never offered to the model in the demo; applying happens only via the
@@ -254,7 +231,7 @@ def guarded_tools(ws: Workspace) -> tuple[list[dict], dict[str, Callable[..., di
                 for p in kwargs.get("projects") or []:
                     if not _SLUG_RE.match(str(p)):
                         raise SandboxError(f"Unknown project '{p}'.")
-                if name in ("testbench_runner", "debug_failing_test"):  # both simulate
+                if name in ("testbench_runner", "debug_failing_test", "verify_loop"):  # all simulate
                     # The runner may compile any HDL file it can reach (rtl_dir, files next
                     # to the testbench), so every HDL file in the workspace must pass.
                     hdl = sorted(p for p in ws.root.rglob("*") if p.is_file() and p.suffix.lower() in (".v", ".sv", ".vh", ".svh"))
@@ -279,6 +256,37 @@ def guarded_tools(ws: Workspace) -> tuple[list[dict], dict[str, Callable[..., di
     return schemas, impls
 
 
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def display_diff(ws: Workspace, diff_text: str) -> str:
+    """Hides the server path in each file's ---/+++ header only (a diff can
+    cover several files). Hunk bodies are walked by their line counts and
+    shown byte-for-byte, so a body line that merely looks like a header is
+    never altered: the approval covers exactly this content."""
+    lines = diff_text.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        hunk = _HUNK_RE.match(line)
+        out.append(ws.scrub(line) if not hunk and line.startswith(("--- ", "+++ ")) else line)
+        i += 1
+        if hunk:
+            old = int(hunk.group(1)) if hunk.group(1) is not None else 1
+            new = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            while i < len(lines) and (old > 0 or new > 0):
+                body = lines[i]
+                out.append(body)
+                i += 1
+                if body.startswith("-"):
+                    old -= 1
+                elif body.startswith("+"):
+                    new -= 1
+                elif not body.startswith("\\"):
+                    old, new = old - 1, new - 1
+    return "".join(out)
+
+
 def pending_diff_ids(ws: Workspace) -> list[str]:
     """Pending diffs whose target is inside the workspace; anything else is
     dropped unpreviewed (the panel must never read a file outside it).
@@ -287,8 +295,12 @@ def pending_diff_ids(ws: Workspace) -> list[str]:
     safe = {}
     for diff_id, entry in pending.items():
         try:
-            ws.resolve(str(entry.get("module_path", "")))
-        except SandboxError:
+            paths = module_modifier.pending_paths(entry)
+            if not paths:
+                continue
+            for p in paths:  # every file of a multi-file change must be inside
+                ws.resolve(str(p))
+        except (SandboxError, KeyError, TypeError):
             continue
         safe[diff_id] = entry
     if safe.keys() != pending.keys():

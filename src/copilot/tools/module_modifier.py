@@ -17,7 +17,7 @@ import uuid
 from pathlib import Path
 
 from ..config import REPO_ROOT, settings
-from ..llm import get_client
+from ..llm import get_client, note_model_call
 
 _PENDING_DIFFS_PATH = REPO_ROOT / ".copilot_pending_diffs.json"
 
@@ -84,11 +84,11 @@ def _tokens(line: str) -> list[str]:
     return _TOKEN_RE.findall(line)
 
 
-def modify_module(module_path: str, instruction: str) -> dict:
-    """Generates a proposed edit to a Verilog module as a reviewable diff.
-    Does NOT write to disk — call apply_diff with the returned diff_id to
-    actually commit it, after you've looked at the diff.
-    """
+def propose_edit(module_path: str, instruction: str) -> dict:
+    """One model call that proposes a new version of a file. Writes nothing
+    and stores nothing: returns {"status": "ok", "new_content", "explanation",
+    "diff"} or an error. modify_module (and verify_loop, on its temp copy)
+    build on it."""
     path = Path(module_path)
     if not path.exists():
         return {"status": "error", "message": f"No file at {module_path}"}
@@ -96,6 +96,7 @@ def modify_module(module_path: str, instruction: str) -> dict:
     original = path.read_text(encoding="utf-8")
 
     client = get_client()
+    note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
         messages=[
@@ -126,20 +127,51 @@ def modify_module(module_path: str, instruction: str) -> dict:
             tofile=f"b/{module_path}",
         )
     )
-    diff_text = "".join(diff_lines) or "(no changes)"
+    return {"status": "ok", "new_content": new_content, "explanation": explanation,
+            "diff": "".join(diff_lines) or "(no changes)"}
 
-    diff_id = uuid.uuid4().hex[:8]
-    pending = _load_pending()
-    pending[diff_id] = {"module_path": module_path, "new_content": new_content}
-    _save_pending(pending)
 
+def modify_module(module_path: str, instruction: str) -> dict:
+    """Generates a proposed edit to a Verilog module as a reviewable diff.
+    Does NOT write to disk — call apply_diff with the returned diff_id to
+    actually commit it, after you've looked at the diff.
+    """
+    proposal = propose_edit(module_path, instruction)
+    if proposal["status"] != "ok":
+        return proposal
+    diff_id = stage_pending([(module_path, proposal["new_content"])])
     return {
         "status": "pending_review",
         "diff_id": diff_id,
-        "diff": diff_text,
-        "explanation": explanation,
+        "diff": proposal["diff"],
+        "explanation": proposal["explanation"],
         "note": "Nothing has been written to disk. Call apply_diff with this diff_id to commit it.",
     }
+
+
+def stage_pending(files: list[tuple[str, str]]) -> str:
+    """Stores a proposed change (one or more (path, new_content)) under a new
+    diff_id for apply_diff. Writes nothing to the target files. Several files
+    are one change: approved and applied all together or not at all."""
+    diff_id = uuid.uuid4().hex[:8]
+    pending = _load_pending()
+    if len(files) == 1:
+        pending[diff_id] = {"module_path": files[0][0], "new_content": files[0][1]}
+    else:
+        pending[diff_id] = {"files": [{"module_path": p, "new_content": c} for p, c in files]}
+    _save_pending(pending)
+    return diff_id
+
+
+def _entry_files(entry: dict) -> list[tuple[str, str]]:
+    """(path, new_content) for every file a pending entry would write."""
+    if "files" in entry:
+        return [(f["module_path"], f["new_content"]) for f in entry["files"]]
+    return [(entry["module_path"], entry["new_content"])]
+
+
+def pending_paths(entry: dict) -> list[str]:
+    return [p for p, _ in _entry_files(entry)]
 
 
 def _fingerprint(module_path: str, current: str, new_content: str) -> str:
@@ -152,6 +184,15 @@ def _fingerprint(module_path: str, current: str, new_content: str) -> str:
     return h.hexdigest()
 
 
+def _entry_fingerprint(entry: dict, currents: list[str]) -> str:
+    """Single-file entries keep the original fingerprint; a multi-file entry
+    covers every file's path, shown state and new content, in order."""
+    parts = [_fingerprint(p, cur, new) for (p, new), cur in zip(_entry_files(entry), currents)]
+    if "files" not in entry:
+        return parts[0]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
 def _current_content(module_path: str) -> str:
     path = Path(module_path)
     return path.read_text(encoding="utf-8") if path.exists() else ""
@@ -159,24 +200,28 @@ def _current_content(module_path: str) -> str:
 
 def preview_pending_diff(diff_id: str) -> tuple[str, str] | None:
     """Returns (diff_text, fingerprint) for what apply_diff(diff_id) would
-    write, computed against the file as it is on disk right now (so edits
-    made since modify_module ran are reflected). None if there is no such
-    pending diff. Read-only; used by the confirmation prompt, which passes
-    the fingerprint to approve_pending_diff only after a human "y".
+    write, computed against the file(s) as they are on disk right now (so
+    edits made since the diff was proposed are reflected). None if there is
+    no such pending diff. Read-only; used by the confirmation prompt, which
+    passes the fingerprint to approve_pending_diff only after a human "y".
     """
     entry = _load_pending().get(diff_id)
     if entry is None:
         return None
-    current = _current_content(entry["module_path"])
-    diff = "".join(
-        difflib.unified_diff(
-            current.splitlines(keepends=True),
-            entry["new_content"].splitlines(keepends=True),
-            fromfile=f"a/{entry['module_path']}",
-            tofile=f"b/{entry['module_path']}",
-        )
-    )
-    return diff or "(no changes)", _fingerprint(entry["module_path"], current, entry["new_content"])
+    currents, diffs = [], []
+    for path, new_content in _entry_files(entry):
+        current = _current_content(path)
+        currents.append(current)
+        diffs.append("".join(
+            difflib.unified_diff(
+                current.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+            )
+        ))
+    diff = "".join(diffs)
+    return diff or "(no changes)", _entry_fingerprint(entry, currents)
 
 
 def approve_pending_diff(diff_id: str, fingerprint: str) -> bool:
@@ -212,8 +257,13 @@ def apply_diff(diff_id: str) -> dict:
         return {"status": "error", "message": f"No pending diff with id '{diff_id}'. It may have already been applied."}
 
     approved = entry.pop("approved_fingerprint", None)
-    current = _current_content(entry["module_path"])
-    if approved is None or approved != _fingerprint(entry["module_path"], current, entry["new_content"]):
+    files = _entry_files(entry)
+    try:
+        currents = [_current_content(p) for p, _ in files]
+    except (OSError, ValueError) as exc:
+        _save_pending(pending)
+        return {"status": "error", "message": f"Could not read a target file ({exc}). Nothing was written."}
+    if approved is None or approved != _entry_fingerprint(entry, currents):
         _save_pending(pending)  # any stale approval is cleared; the diff stays pending for re-review
         return {
             "status": "declined",
@@ -222,14 +272,37 @@ def apply_diff(diff_id: str) -> dict:
         }
 
     try:
-        Path(entry["module_path"]).write_text(entry["new_content"], encoding="utf-8")
+        # Exact original bytes of every target (None = did not exist), for rollback.
+        originals = [(Path(p), Path(p).read_bytes() if Path(p).exists() else None) for p, _ in files]
     except OSError as exc:
+        _save_pending(pending)
+        return {"status": "error", "message": f"Could not read a target file ({exc}). Nothing was written."}
+    attempted = 0
+    try:
+        for (path, new_content), _ in zip(files, originals):
+            attempted += 1  # counted before the write: a failed write may still have truncated the file
+            Path(path).write_text(new_content, encoding="utf-8")
+    except OSError as exc:
+        # All or nothing: restore every file touched, including the one that failed.
+        not_restored = []
+        for target, original in reversed(originals[:attempted]):
+            try:
+                if original is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.write_bytes(original)
+            except OSError:
+                not_restored.append(str(target))
         _save_pending(pending)  # keep the proposal (approval already cleared) so it can be retried
+        if not_restored:
+            return {"status": "error", "files_not_restored": not_restored,
+                    "message": f"Write failed ({exc}) and these files could not be restored, so they may be "
+                    f"partly changed: {', '.join(not_restored)}. Diff {diff_id} is still pending."}
         return {"status": "error", "message": f"Write failed, nothing applied ({exc}). Diff {diff_id} is still pending."}
 
     del pending[diff_id]
     _save_pending(pending)
-    return {"status": "ok", "message": f"Applied diff {diff_id} to {entry['module_path']}."}
+    return {"status": "ok", "message": f"Applied diff {diff_id} to {', '.join(p for p, _ in files)}."}
 
 
 SCHEMAS = [

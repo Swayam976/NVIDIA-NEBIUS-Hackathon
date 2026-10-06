@@ -21,9 +21,36 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 14 | testbench_runner multi-file designs + program files; spec_drafting_assistant flags names not in the RTL | Claude | done |
 | 15 | New skill: debug_failing_test (run tb, locate first mismatch in VCD, root cause, fix as pending diff) | Claude | done |
 | 16 | New skill: testbench_auditor (expected-value model vs RTL/spec, report only) | Claude | done |
+| 17 | New skill: verify_loop (closed loop: change -> test -> debug in a temp copy, max 3 rounds, one gated diff) | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 17 done: verify_loop (tools/verify_loop.py), 19
+  skills. Copies the project (project_files: generated/VCS trees skipped,
+  <=3000 files / 50 MB) plus Vivado mem_init_files into a temp folder; all
+  edits go through a guard that refuses writes outside the copy and edits
+  that ADD file/process access (tools/hdl_safety.py, shared with the web
+  sandbox's allowlist). Round 1: modify_module-style edit of the RTL, then of
+  every testbench that instantiates it (max 3); every testbench whose design
+  includes the module runs each round (+ lint on edited RTL). Done = target
+  tb passes + everything that passed before still passes + every edited tb
+  passes; pre-broken untouched tbs are reported as "unverified". Failures:
+  compile error -> one fix call on the file iverilog blames; FAIL ->
+  diagnose_failure (debug_failing_test's core, now split out) + one fix call;
+  max 3 rounds, last round diagnosis only. Budget per round <= 4 calls,
+  counted by llm.count_model_calls. All inputs re-hashed before staging;
+  ONE combined pending diff (module_modifier.stage_pending, multi-file
+  entries: one fingerprint over all files, all-or-nothing apply with
+  byte-exact rollback incl. a truncated file, failed restores reported).
+  Gate logic unchanged: CLI preview/approve/apply and the web panel just
+  handle several files (panel header scrub now walks hunks: sandbox.
+  display_diff). Temp folder deleted on every exit path; no git anywhere.
+  Codex round 1: rollback of the failing file, hidden restore failures,
+  edited tbs must pass (fixed); round 2: model HDL simulated unreviewed in
+  the CLI (blocking; fixed via hdl_safety), mem_init_files outside the copy,
+  stale non-edited inputs (fixed). 2 rounds used. New check:
+  tests/test_verify_loop.py (also re-run test_sandbox, test_apply_gate).
 
 - 2026-10-06, Claude, task 16 done: testbench_auditor (tools/debugging.py),
   18 skills now. Report only: never writes; fixes go through modify_module

@@ -40,8 +40,8 @@ try:
     schemas, impls = sandbox.guarded_tools(ws)
     names = {s["function"]["name"] for s in schemas}
     assert "apply_diff" not in names and "apply_diff" not in impls, "model must never get apply_diff in the demo"
-    assert len(names) == 17
-    print("guarded_tools: apply_diff withheld from the model, 17 tools offered: OK")
+    assert len(names) == 18
+    print("guarded_tools: apply_diff withheld from the model, 18 tools offered: OK")
 
     # --- guarded tool calls ---
     (outside / "secret.v").write_text("module s; endmodule\n", encoding="utf-8")
@@ -106,11 +106,27 @@ try:
         module_modifier._save_pending({
             "good": {"module_path": str(ws.root / "rtl" / "alu.v"), "new_content": "x"},
             "evil": {"module_path": "/proc/self/environ", "new_content": "x"},
+            # A multi-file change (verify_loop) is dropped if ANY file is outside.
+            "multi_good": {"files": [{"module_path": str(ws.root / "rtl" / "alu.v"), "new_content": "x"},
+                                     {"module_path": str(ws.root / "rtl" / "alu_tb.v"), "new_content": "y"}]},
+            "multi_evil": {"files": [{"module_path": str(ws.root / "rtl" / "alu.v"), "new_content": "x"},
+                                     {"module_path": "/etc/passwd", "new_content": "y"}]},
+            "empty": {"files": []},
         })
-        assert sandbox.pending_diff_ids(ws) == ["good"]
-        assert "evil" not in module_modifier._load_pending()
+        assert sandbox.pending_diff_ids(ws) == ["good", "multi_good"]
+        assert not {"evil", "multi_evil", "empty"} & module_modifier._load_pending().keys()
         module_modifier._save_pending({})
     assert memory.MEMORY_DIR == MEMORY_DIR, "activate() must restore the globals"
+    # Diff panel: every file's header loses the server path; hunk bodies are
+    # untouched, even a removed/added pair that looks like a header.
+    root = str(ws.root)
+    two_files = (f"--- a/{root}/rtl/alu.v\n+++ b/{root}/rtl/alu.v\n@@ -1,2 +1,2 @@\n"
+                 f"--- {root} looks like a header\n+++ {root} too\n@@ -1 +1 @@ not a hunk\n"
+                 f"--- a/{root}/rtl/alu_tb.v\n+++ b/{root}/rtl/alu_tb.v\n@@ -3 +3 @@\n-x\n+y\n")
+    shown = sandbox.display_diff(ws, two_files).splitlines()
+    assert shown[0] == "--- a/./rtl/alu.v" and shown[7] == "+++ b/./rtl/alu_tb.v", shown
+    assert shown[3] == f"--- {root} looks like a header" and shown[4] == f"+++ {root} too", "body altered"
+    assert shown[5] == "@@ -1 +1 @@ not a hunk", shown
     print("pending_diff_ids: outside-target entries dropped; globals restored: OK")
 
     # --- HDL source check ---
@@ -175,8 +191,25 @@ try:
             # debug_failing_test simulates too: same guard, stopped before any model call.
             r = impls["debug_failing_test"](**kwargs)
             assert r["status"] == "not_debuggable" and r["testbench_status"] == "blocked" or r["status"] == "blocked", (kwargs, r)
+        # verify_loop simulates too: same whole-workspace guard, before any copy or model call.
+        r = impls["verify_loop"](goal="add NOR", module_path="rtl/alu.v", tb_path="rtl/alu_tb.v")
+        assert r["status"] == "blocked", r
         shutil.rmtree(rtl / "deep")
+        r = impls["verify_loop"](goal="add NOR", module_path="rtl/alu.v", tb_path="rtl/alu_tb.v",
+                                 project_dir=str(outside))
+        assert r["status"] == "error" and "outside" in r["message"], r
+        # ...and the compile check runs on the temp copy's own inputs, every compile.
+        seen_inputs = []
+        real_vl = sandbox.TOOL_IMPLS["verify_loop"]
+        sandbox.TOOL_IMPLS["verify_loop"] = lambda **kw: seen_inputs.append(kw.get("compile_check")) or {"status": "ok"}
+        try:
+            _, impls_v = sandbox.guarded_tools(ws)
+            impls_v["verify_loop"](goal="g", module_path="rtl/alu.v", tb_path="rtl/alu_tb.v")
+        finally:
+            sandbox.TOOL_IMPLS["verify_loop"] = real_vl
+        assert seen_inputs == [sandbox.check_hdl_sources], seen_inputs
         print("guarded testbench_runner: rtl_dir works in the workspace; an unsafe file anywhere blocks it: OK")
+        print("guarded verify_loop: workspace guard, confined project_dir, compile_check passed on: OK")
 finally:
     shutil.rmtree(ws.root, ignore_errors=True)
     shutil.rmtree(outside, ignore_errors=True)

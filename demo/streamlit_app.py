@@ -150,13 +150,7 @@ def _discard(diff_id: str) -> None:
 
 
 def _display_diff(ws: sandbox.Workspace, diff_text: str) -> str:
-    """Hides the server path in the ---/+++ header only. Body lines are shown
-    byte-for-byte: the approval covers exactly this content."""
-    lines = diff_text.splitlines(keepends=True)
-    for i in range(min(2, len(lines))):
-        if lines[i].startswith(("--- ", "+++ ")):
-            lines[i] = ws.scrub(lines[i])
-    return "".join(lines)
+    return sandbox.display_diff(ws, diff_text)
 
 
 def _pending_panel(ws: sandbox.Workspace) -> None:

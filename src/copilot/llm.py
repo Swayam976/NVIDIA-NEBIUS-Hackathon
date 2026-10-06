@@ -8,13 +8,35 @@ just point the client at Nebius's base_url with our Token Factory API key.
 from __future__ import annotations
 
 import json
-from typing import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Callable, Iterator
 
 from openai import OpenAI
 
 from .config import settings
 
 _client: OpenAI | None = None
+_call_counter: ContextVar[list[int] | None] = ContextVar("copilot_model_calls", default=None)
+
+
+@contextmanager
+def count_model_calls() -> Iterator[list[int]]:
+    """Counts the skills' own model calls (json_completion, modify_module's
+    edit call) made inside the block: `with count_model_calls() as n: ...`,
+    then n[0]. Calls that fail still count."""
+    box = [0]
+    token = _call_counter.set(box)
+    try:
+        yield box
+    finally:
+        _call_counter.reset(token)
+
+
+def note_model_call() -> None:
+    box = _call_counter.get()
+    if box is not None:
+        box[0] += 1
 
 
 def get_client() -> OpenAI:
@@ -30,6 +52,7 @@ def json_completion(client, messages: list[dict], max_tokens: int = 4000, thinki
     otherwise spend the whole output budget thinking and return no content
     (finish_reason=length). thinking=True keeps it on for genuine reasoning
     tasks; give it a large max_tokens. Raises if the output was cut off."""
+    note_model_call()
     response = client.chat.completions.create(
         model=settings.nebius_model,
         messages=messages,

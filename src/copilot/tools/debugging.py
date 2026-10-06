@@ -192,24 +192,53 @@ def debug_failing_test(
     """Debugs a failing testbench and proposes a fix as a pending diff.
     Returns the failing check, root cause (file:line), confidence and the
     pending diff. Nothing is written; the diff waits for apply_diff."""
+    result, proposal = diagnose_failure(tb_path, module_path, rtl_dir, compile_check, propose=modify_module)
+    if result.get("status") != "failing":
+        return result
+    pending, note = None, result.pop("_note")
+    if proposal is not None:
+        if proposal.get("status") == "pending_review":
+            pending = {k: proposal[k] for k in ("diff_id", "diff", "explanation")}
+        else:
+            note = f"modify_module could not produce a diff: {proposal.get('message', proposal.get('status'))}"
+    return {
+        **result,
+        "pending_diff": pending,
+        "note": (note + " " if note else "") + "Nothing was written. Review the diff and apply it only with "
+        "apply_diff, which asks for the user's explicit yes.",
+    }
+
+
+def diagnose_failure(
+    tb_path: str,
+    module_path: str = "",
+    rtl_dir: str = "",
+    compile_check: Callable[[list[Path]], str | None] | None = None,
+    propose: Callable[[str, str], dict] | None = None,
+    data_dirs: list[Path] | None = None,
+) -> tuple[dict, dict | None]:
+    """debug_failing_test's core: run, locate, one root-cause call. If the
+    model names a fix and `propose` is given, propose(file, instruction) is
+    called once (modify_module, or verify_loop's store-free propose_edit).
+    Returns (result, proposal or None); a "failing" result carries "_note"."""
     with tempfile.TemporaryDirectory(prefix="copilot_debug_") as tmp:
         vcd = Path(tmp) / "debug.vcd"
         run = testbench_runner(module_path=module_path, tb_path=tb_path, rtl_dir=rtl_dir,
-                               compile_check=compile_check, vcd_out=vcd)
+                               compile_check=compile_check, vcd_out=vcd, data_dirs=data_dirs)
         status = run.get("status")
         if status == "pass":
             return {"status": "pass", "message": "The testbench passes; there is nothing to debug.",
-                    "pass_lines": run.get("pass_lines")}
+                    "pass_lines": run.get("pass_lines")}, None
         if status != "fail_or_unknown":
             return {
                 "status": "not_debuggable",
                 "testbench_status": status,
                 "message": _NOT_DEBUGGABLE.get(status, run.get("message", "The testbench could not be run.")),
                 **{k: run[k] for k in ("headline", "missing_data_files", "stderr", "duplicates") if run.get(k)},
-            }
+            }, None
         if not run.get("fail_lines") and not run.get("exit_code"):
             return {"status": "not_debuggable", "testbench_status": status,
-                    "message": "The testbench prints no PASS/FAIL lines, so there is no failing check to start from."}
+                    "message": "The testbench prints no PASS/FAIL lines, so there is no failing check to start from."}, None
 
         # Always the EARLIEST failure: a later line may be a downstream symptom.
         failing = (run.get("first_failures") or [""])[0]
@@ -245,7 +274,7 @@ def debug_failing_test(
         review = _ask_root_cause([{"role": "system", "content": _DEBUG_PROMPT}, {"role": "user", "content": user}])
     except Exception as exc:  # noqa: BLE001 - keep the evidence even without a diagnosis
         return {"status": "error", "message": f"Root-cause analysis unavailable ({type(exc).__name__}).",
-                "evidence": evidence}
+                "evidence": evidence}, None
 
     target = _resolve_file(review.get("file"), shown)
     line = review.get("line") if isinstance(review.get("line"), int) else None
@@ -254,13 +283,10 @@ def debug_failing_test(
     confidence = review.get("confidence") if review.get("confidence") in ("high", "medium", "low") else "low"
     instruction = str(review.get("fix_instruction") or "").strip()
 
-    pending, note = None, None
+    proposal, note = None, None
     if target and instruction:
-        proposal = modify_module(str(target), f"{instruction} Change nothing else.")
-        if proposal.get("status") == "pending_review":
-            pending = {k: proposal[k] for k in ("diff_id", "diff", "explanation")}
-        else:
-            note = f"modify_module could not produce a diff: {proposal.get('message', proposal.get('status'))}"
+        if propose is not None:
+            proposal = propose(str(target), f"{instruction} Change nothing else.")
     elif not target:
         note = "The model named no file it was shown, so no fix was proposed."
     else:
@@ -273,11 +299,9 @@ def debug_failing_test(
         "file": str(target) if target else review.get("file"),
         "line": line,
         "confidence": confidence,
-        "pending_diff": pending,
         "evidence": evidence,
-        "note": (note + " " if note else "") + "Nothing was written. Review the diff and apply it only with "
-        "apply_diff, which asks for the user's explicit yes.",
-    }
+        "_note": note,
+    }, proposal
 
 
 # ----------------------------------------------------------- testbench_auditor

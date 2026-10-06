@@ -198,6 +198,7 @@ def testbench_runner(
     timeout_s: int = 60,
     compile_check: Callable[[list[Path]], str | None] | None = None,
     vcd_out: Path | None = None,
+    data_dirs: list[Path] | None = None,
 ) -> dict:
     """Compiles and runs a Verilog testbench with Icarus Verilog and returns
     pass/fail plus a short summary instead of the raw simulator log.
@@ -217,6 +218,10 @@ def testbench_runner(
     whole testbench hierarchy, by compiling in one generated module (the
     user's files are untouched), and copy it to vcd_out. The result then
     carries "vcd_path" and "_compiled_paths" (absolute source paths).
+
+    data_dirs (internal, not in the tool schema): extra program/memory file
+    folders, searched last (verify_loop passes its snapshot of the real
+    project's Vivado mem_init_files, which its temp copy can't find).
     """
     if not _tool_available("iverilog") or not _tool_available("vvp"):
         return {
@@ -268,7 +273,7 @@ def testbench_runner(
     with tempfile.TemporaryDirectory(prefix="copilot_tb_") as tmp:
         run_dir = Path(tmp)
         data_roots = [tb.parent, tb.parent.parent, *bases[:-1], *(m.parent for m in explicit),
-                      *_vivado_mem_init_dirs(tb.parent)]
+                      *_vivado_mem_init_dirs(tb.parent), *(data_dirs or [])]
         staged, data_conflicts = _stage_data_files(data_roots, run_dir)
         out_bin = run_dir / "tb.out"
         dump_args: list[str] = []
