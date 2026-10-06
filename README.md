@@ -71,6 +71,24 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 | `next_step_suggester` | Proposes the next concrete task for a project |
 | `daily_brief` | Rolls up status/blockers across all tracked projects |
 
+## Web demo
+
+`demo/streamlit_app.py` is a password-protected web UI, deployed on Streamlit
+Community Cloud (main file `demo/streamlit_app.py`; `packages.txt` installs
+iverilog + Verilator). Set these app secrets:
+
+```toml
+NEBIUS_API_KEY = "..."
+DEMO_PASSWORD  = "..."
+```
+
+Each visitor gets a throwaway workspace with a small sample ALU. Tools are
+confined to it, lint and simulation refuse file-access system tasks and
+`` `include ``, and per-session/daily message caps protect API credits. Edits are
+proposed as diffs and only written when the visitor clicks **Approve**.
+Run it locally with `pip install -r demo/requirements.txt` then
+`streamlit run demo/streamlit_app.py`.
+
 ## Safety note
 
 `apply_diff` is the only tool that writes to your actual RTL files. The CLI

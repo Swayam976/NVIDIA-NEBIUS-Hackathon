@@ -46,6 +46,7 @@ def run_agent_loop(
     tool_impls: dict[str, Callable[..., dict]],
     confirm_tool_call: Callable[[str, dict], bool] | None = None,
     max_turns: int = 8,
+    extra_system: str = "",
 ) -> tuple[str, list[dict]]:
     """Runs one user turn through the agent, executing tool calls as needed.
 
@@ -55,10 +56,14 @@ def run_agent_loop(
     model is told the call was declined. If it is None, gated tools are
     always declined (fail closed) — they never run without a human yes.
 
+    extra_system is appended to the system prompt (e.g. the web demo's
+    workspace rules); it can add constraints but never removes the gate.
+
     Returns (final_text_response, updated_history).
     """
     client = get_client()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history, {"role": "user", "content": user_message}]
+    system = SYSTEM_PROMPT + ("\n" + extra_system if extra_system else "")
+    messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user_message}]
 
     for _ in range(max_turns):
         response = client.chat.completions.create(

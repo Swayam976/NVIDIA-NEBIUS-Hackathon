@@ -31,8 +31,9 @@ else:
     assert clean["status"] == "clean", clean
     dirty = TOOL_IMPLS["lint_checker"](file_path=str(FIXTURES / "width_mismatch.v"))
     assert dirty["status"] == "issues_found", dirty
-    assert dirty["warning_count"] == 1 and "WIDTHEXPAND" in dirty["warnings"][0], dirty
-    print("lint_checker: OK -> clean fixture clean; WIDTHEXPAND caught:", dirty["warnings"][0][:70])
+    # Verilator 5 says WIDTHEXPAND, Verilator 4 (Debian 11 / Streamlit Cloud) says WIDTH.
+    assert dirty["warning_count"] == 1 and "%Warning-WIDTH" in dirty["warnings"][0], dirty
+    print("lint_checker: OK -> clean fixture clean; width warning caught:", dirty["warnings"][0][:70])
 
 # --- Windows: never pick the extensionless `verilator` Perl script (WinError 193) ---
 _fake_which = {"verilator": r"C:\fake\bin\verilator", "verilator_bin": r"C:\fake\bin\verilator_bin.EXE"}

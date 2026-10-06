@@ -147,6 +147,15 @@ def approve_pending_diff(diff_id: str, fingerprint: str) -> bool:
     return True
 
 
+def discard_pending_diff(diff_id: str) -> bool:
+    """Drops a proposed diff without writing anything. Returns True if it existed."""
+    pending = _load_pending()
+    if pending.pop(diff_id, None) is None:
+        return False
+    _save_pending(pending)
+    return True
+
+
 def apply_diff(diff_id: str) -> dict:
     """Writes a previously generated diff to disk, but only if a human
     approved it (approve_pending_diff) and neither the target file nor the

@@ -18,7 +18,9 @@ Nebius x NVIDIA Global AI Hackathon, Personal AI track.
 - Scheduler: GitHub Actions cron workflow (`.github/workflows/daily-brief.yml`)
   runs `python -m src.copilot.brief` against Token Factory; `NEBIUS_API_KEY`
   lives only in GitHub Actions secrets
-- Demo host: free hosting, platform TBD (task 7)
+- Demo host: Streamlit Community Cloud (`demo/streamlit_app.py`): per-session
+  sandboxed workspace with a sample ALU, password + message caps, changes
+  applied only via an Approve click on the shown diff (`src/copilot/sandbox.py`)
 - Nebius usage is Token Factory only: no Nebius AI Cloud (Serverless Jobs,
   Endpoints, MysteryBox)
 - Interface: CLI (`python -m src.copilot.cli`)
@@ -49,4 +51,6 @@ spotter, Next-step suggester, Daily/weekly brief.
 
 ## Checks to run before calling anything done
 - `python tests/smoke_test.py` (mocked LLM, no network)
+- `python tests/test_apply_gate.py`, `tests/test_brief.py`, `tests/test_sandbox.py`,
+  `tests/test_verification.py`, `tests/test_web_demo.py` (needs `pip install -r demo/requirements.txt`)
 - Any new unit tests under `tests/`
