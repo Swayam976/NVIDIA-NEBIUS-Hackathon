@@ -45,7 +45,7 @@ src/copilot/
   config.py      - env/config loading
   memory.py      - reads/writes memory/projects/*.md
   llm.py         - Nemotron client + tool-calling loop
-  tools/         - the 16 skills, as callable tools with JSON schemas
+  tools/         - the 18 skills, as callable tools with JSON schemas
   cli.py         - REPL entrypoint
 memory/projects/ - one markdown file per hardware project (persistent state)
 ```
@@ -70,6 +70,8 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 | `regression_spotter` | Flags commits touching modules with existing tests |
 | `next_step_suggester` | Proposes the next concrete task for a project |
 | `daily_brief` | Rolls up status/blockers across all tracked projects |
+| `debug_failing_test` | Runs a failing testbench, finds the first mismatch in the waveform, names the root cause (file:line, confidence) and proposes a fix as a pending diff for `apply_diff` |
+| `testbench_auditor` | Checks every expected-value computation in a testbench against the RTL (and spec); reports mismatches with file:line, changes nothing |
 
 ## Web demo
 

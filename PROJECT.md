@@ -25,12 +25,13 @@ Nebius x NVIDIA Global AI Hackathon, Personal AI track.
   Endpoints, MysteryBox)
 - Interface: CLI (`python -m src.copilot.cli`)
 
-## The 16 skills
+## The 18 skills
 Project state tracker, Decision log, Cross-project linker, Testbench runner,
 Waveform summarizer, Lint checker, Hazard sanity checker, Module modifier
 (generates diff), apply_diff (approval-gated), ISA spec cross-referencer,
 Spec drafting assistant, Changelog generator, Commit-to-summary, Regression
-spotter, Next-step suggester, Daily/weekly brief.
+spotter, Next-step suggester, Daily/weekly brief, Debug failing test, Testbench
+auditor.
 
 ## Hard constraints
 1. `apply_diff` must always show the diff and wait for an explicit human yes.
