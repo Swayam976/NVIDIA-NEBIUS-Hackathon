@@ -17,9 +17,31 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 10 | apply_diff gate: fail closed with no confirm handler; prompt shows real diff | Claude | done |
 | 11 | Live audit of all 16 skills via CLI (RISC-V files), report + ranked fixes | Claude | done |
 | 12 | Audit fixes 1-4: testbench summary, hazard checker, grounded spec drafts, git-skill errors + mtime fallback | Claude | done |
+| 13 | Audit fixes 5-7: waveform_summarizer dependency, cross_project_linker noise, isa_spec_cross_referencer RV32I mode | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-06, Claude, task 13 done (audit fixes 5-7). waveform_summarizer:
+  built-in streaming VCD reader (tools/vcd.py, stdlib only) instead of
+  vcdvcd, whose licence is Perl 5 (Artistic 1 / GPL 1); full-width values
+  + hex/dec, real values typed, time unit, value at window start, exact
+  leaf match preferred. cross_project_linker: identifier-aware tokens,
+  stopwords, words every project shares dropped, explicit project mentions
+  scored highest, single shared word no longer a link. isa_spec_cross_
+  referencer: RV32I mode (spec_path omitted or 'rv32i'): opcode-literal scan
+  over all RTL as a hint + one Nemotron JSON call; live on the RISC-V core
+  5/5 runs = 37/40 (FENCE, ECALL, EBREAK missing). New llm.json_completion:
+  thinking off for tool JSON calls (live: Nemotron spent all 8192 tokens
+  reasoning, empty reply); hazard review uses it too. Compact reply format +
+  one retry for unanswered instructions (live: a broken JSON string
+  swallowed 29 entries). Codex round 1: literal absence as definitive
+  missing, value_at_start off by one, big files dropped (all fixed).
+  Round 2: real VCD values (fixed); "downgrade missing on any omitted file"
+  PARTLY ACCEPTED: any cut/omitted file now counts, but "missing" stands
+  when the opcode has no literal in any file (the scan reads all RTL), else
+  the real core's correct FENCE/ECALL/EBREAK result would become unclear.
+  The reply-format/retry change came after round 2 and is unreviewed.
 
 - 2026-10-06, Claude, task 12 done (audit fixes 1-4). testbench_runner:
   headline + pass/fail counts + failure-field grouping (real ALU_tb: 70/30,

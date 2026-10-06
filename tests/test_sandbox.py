@@ -56,6 +56,25 @@ try:
     assert r["status"] == "ok" and "XOR" in r["current_status"], r
     print("guarded calls: outside path / bad project slug refused, valid call OK")
 
+    # Empty / "rv32i" spec_path selects the built-in RV32I list instead of being
+    # resolved as a path (model call stubbed: no network in this test).
+    import types  # noqa: E402
+    from unittest import mock  # noqa: E402
+    from src.copilot.tools import docs  # noqa: E402
+
+    def _no_answer(**kwargs):
+        msg = types.SimpleNamespace(content='{"instructions": []}')
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason="stop")])
+
+    stub = types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=_no_answer)))
+    for spec in ("", "rv32i"):
+        with mock.patch.object(docs, "get_client", return_value=stub):
+            r = impls["isa_spec_cross_referencer"](rtl_dir="rtl", spec_path=spec)
+        assert r["status"] == "ok" and r["mode"] == "rv32i" and len(r["unclear"]) == 40, r
+    r = impls["isa_spec_cross_referencer"](rtl_dir="rtl", spec_path="../../etc/passwd")
+    assert r["status"] == "error" and "outside" in r["message"], r
+    print("guarded isa_spec_cross_referencer: RV32I mode in the workspace, spec paths still confined: OK")
+
     # Smuggled kwargs (not in the tool schema) are dropped, not passed through.
     seen = {}
     real = sandbox.TOOL_IMPLS["hazard_sanity_checker"]

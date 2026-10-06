@@ -24,6 +24,24 @@ def get_client() -> OpenAI:
     return _client
 
 
+def json_completion(client, messages: list[dict], max_tokens: int = 4000) -> str:
+    """One JSON-object completion for a structured check (a tool's own model
+    call, not the agent loop). Reasoning is switched off: Nemotron otherwise
+    can spend the whole output budget thinking and return no content
+    (finish_reason=length). Raises if the output was cut off."""
+    response = client.chat.completions.create(
+        model=settings.nebius_model,
+        messages=messages,
+        response_format={"type": "json_object"},
+        max_tokens=max_tokens,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    choice = response.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        raise RuntimeError("model output was cut off (finish_reason=length)")
+    return choice.message.content or ""
+
+
 SYSTEM_PROMPT = """\
 You are a hardware design copilot. You help with the following active \
 projects: RISC-V core (riscv-core), SIMT GPU core (simt-gpu-core), \

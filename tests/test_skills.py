@@ -105,6 +105,22 @@ with mock.patch.object(verification, "get_client", return_value=fake_client(revi
     r = verification.hazard_sanity_checker(BENIGN)
 assert r["status"] == "flagged" and r["model_review"]["verdict"] == "likely_hazard", r
 assert calls[0]["response_format"] == {"type": "json_object"}
+# Structured calls switch reasoning off: on Nemotron it could otherwise use the
+# whole output budget and return empty content (seen live in the RV32I check).
+assert calls[0]["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}, calls[0]
+assert calls[0]["max_tokens"] > 0
+
+
+def cut_off_client():
+    def create(**kwargs):
+        msg = types.SimpleNamespace(content="")
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason="length")])
+    return types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+
+
+with mock.patch.object(verification, "get_client", return_value=cut_off_client()):
+    r = verification.hazard_sanity_checker(REGRESSION)
+assert r["model_review"] == {"status": "unavailable", "message": "RuntimeError"} and r["status"] == "flagged", r
 with mock.patch.object(verification, "get_client", return_value=fake_client(json.dumps({"verdict": "no_hazard_found", "findings": []}))):
     r = verification.hazard_sanity_checker(BENIGN)
 assert r["status"] == "no_flags_needs_simulation", "clean review must still say 'needs simulation', never 'safe'"
@@ -186,5 +202,160 @@ try:
 finally:
     # git marks object files read-only, which plain rmtree can't delete on Windows.
     shutil.rmtree(tmp, onexc=lambda fn, p, exc: (os.chmod(p, 0o700), fn(p)))
+
+# --- 5. waveform_summarizer (built-in VCD reader) ------------------------------------
+from src.copilot import memory  # noqa: E402
+from src.copilot.tools import project_state  # noqa: E402
+
+VCD = """$date today $end
+$timescale
+  1ns
+$end
+$scope module tb $end
+$var wire 8 ! result [7:0] $end
+$var wire 1 " zero $end
+$scope module dut $end
+$var wire 8 # result [7:0] $end
+$upscope $end
+$var reg 4 $ op_result [3:0] $end
+$var real 64 % temp $end
+$upscope $end
+$enddefinitions $end
+$comment ignored b1111 ! $end
+#0
+$dumpvars
+bx !
+1"
+b0 #
+b0 $
+$end
+#10
+b101 !
+0"
+r10 %
+#20
+b11111111 !
+r2.5 %
+#35
+b1 !
+1"
+"""
+tmp2 = Path(tempfile.mkdtemp(prefix="copilot_skills_"))
+try:
+    vcd_file = tmp2 / "t.vcd"
+    vcd_file.write_text(VCD, encoding="utf-8")
+    r = verification.waveform_summarizer(str(vcd_file), "result")
+    assert r["status"] == "ok" and r["signal"] == "tb.result[7:0]", r  # exact leaf, testbench first
+    assert r["other_matches"] == ["tb.dut.result[7:0]"] and r["time_unit"] == "1ns" and r["width_bits"] == 8
+    assert [c["time"] for c in r["changes"]] == [0, 10, 20, 35], "the $comment must not count as a change"
+    assert r["changes"][0] == {"time": 0, "value": "xxxxxxxx"}, "unknown value: padded, no hex/dec"
+    assert r["changes"][1] == {"time": 10, "value": "00000101", "hex": "05", "dec": 5}
+    r = verification.waveform_summarizer(str(vcd_file), "result", t_start=15, t_end=30)
+    assert r["value_at_start"]["dec"] == 5 and r["transitions_in_window"] == 1 and r["changes"][0]["hex"] == "ff", r
+    # A change exactly at t_start is the value in effect then (Codex review).
+    assert verification.waveform_summarizer(str(vcd_file), "result", t_start=10)["value_at_start"]["dec"] == 5
+    assert verification.waveform_summarizer(str(vcd_file), "result")["value_at_start"] == {"value": "xxxxxxxx"}
+    r = verification.waveform_summarizer(str(vcd_file), "zero")
+    assert [(c["time"], c["value"]) for c in r["changes"]] == [(0, "1"), (10, "0"), (35, "1")], r
+    r = verification.waveform_summarizer(str(vcd_file), "nosuch")
+    assert r["status"] == "not_found" and "tb.zero" in r["available"], r
+    # Real values keep their type: "r10" is ten, not binary 10 = 2 (Codex review, round 2).
+    r = verification.waveform_summarizer(str(vcd_file), "temp")
+    assert r["changes"] == [{"time": 10, "value": "10", "real": 10.0}, {"time": 20, "value": "2.5", "real": 2.5}], r
+    print("waveform_summarizer: scopes, x values, hex/dec, window start value, exact-match preference: OK")
+
+    # --- 6. cross_project_linker --------------------------------------------------
+    mem = tmp2 / "memory"
+    mem.mkdir()
+    def proj(name, status):
+        (mem / f"{name}.md").write_text(f"# {name}\n\n## Status\n{status}\n\n## Decisions\n(none yet)\n\n## Blockers\n(none yet)\n",
+                                        encoding="utf-8")
+    proj("cpu", "Pipelined core in Vivado with forwarding and branch flush logic. Project status: fixed.")
+    proj("gpu", "SIMT core built from the cpu pipeline, with forwarding and branch flush in Vivado.")
+    proj("npu", "Systolic array accelerator in Vivado. Project status: planned.")
+    proj("gemm", "Systolic array GEMM extending the npu design, in Vivado.")
+    with mock.patch.object(memory, "MEMORY_DIR", mem):
+        cpu = project_state.cross_project_linker("cpu")["related_projects"]
+        gemm = project_state.cross_project_linker("gemm")["related_projects"]
+    assert [r["project"] for r in cpu] == ["gpu"] and cpu[0]["mentions"], cpu
+    assert {"forwarding", "branch", "flush"} <= set(cpu[0]["shared_terms"]), cpu
+    assert "vivado" not in cpu[0]["shared_terms"], "a word every project uses is noise"
+    assert all(t not in cpu[0]["shared_terms"] for t in ("project", "status", "fixed")), "stopwords"
+    assert [r["project"] for r in gemm] == ["npu"] and gemm[0]["mentions"], gemm
+    print("cross_project_linker: mentions + technical words; stopwords and everywhere-words dropped: OK")
+
+    # --- 7. isa_spec_cross_referencer, RV32I mode ----------------------------------
+    rtl = tmp2 / "rtl"
+    rtl.mkdir()
+    (rtl / "control.v").write_text(
+        "module control(input [6:0] opcode, output reg alu);\n"
+        "  localparam OP_R = 7'b0110011, OP_I = 7'h13;\n"
+        "  always @(*) alu = (opcode == OP_R) | (opcode == OP_I) | (opcode == 7'd55); // 55 = LUI\n"
+        "  // 7'b1110011 (SYSTEM) in a comment does not count\n"
+        "endmodule\n", encoding="utf-8")
+    (rtl / "control_tb.v").write_text("module control_tb; wire x = 7'b1101111; endmodule\n", encoding="utf-8")
+    reply = json.dumps({
+        # Name variants seen live: echoed listing line, description, object with another key.
+        "implemented": ["ADD", "XOR: opcode=0110011 funct3=100", "OR (bitwise or)", {"mnemonic": "AND"}],
+        "missing": [{"name": "sub", "evidence": "no funct7 check"}, {"name": "ECALL", "evidence": "no SYSTEM decode"}],
+        "unclear": [{"name": "ADDI", "evidence": "?"}],
+    })
+    retry_reply = json.dumps({"implemented": ["LUI"], "missing": [], "unclear": []})
+
+    def seq_client(replies, sink):
+        replies = list(replies)
+        def create(**kwargs):
+            sink.append(kwargs)
+            msg = types.SimpleNamespace(content=replies.pop(0) if len(replies) > 1 else replies[0])
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg, finish_reason="stop")])
+        return types.SimpleNamespace(chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create)))
+
+    calls = []
+    with mock.patch.object(docs, "get_client", return_value=seq_client([reply, retry_reply], calls)):
+        r = docs.isa_spec_cross_referencer(str(rtl))
+    assert r["mode"] == "rv32i" and r["implemented"] == ["LUI", "ADD", "XOR", "OR", "AND"], r
+    assert r["missing"] == ["SUB", "ECALL"], r
+    assert "ADDI" in r["unclear"] and "JAL" in r["unclear"], "unanswered -> unclear"
+    assert "no opcode literal found" in r["details"]["JAL"]["evidence"], "tb + comment opcodes ignored"
+    assert len(r["implemented"]) + len(r["missing"]) + len(r["unclear"]) == 40
+    # A partial answer (live: a broken string swallowed later entries) gets one
+    # retry that asks only about the instructions still missing an answer.
+    assert len(calls) == 2
+    retry_asked = calls[1]["messages"][1]["content"]
+    assert "LUI: opcode" in retry_asked and "ADD: opcode" not in retry_asked and "ECALL: opcode" not in retry_asked
+    asked = calls[0]["messages"][1]["content"]
+    # All 40 go to the model; literal presence is a hint, not a verdict (Codex review).
+    assert "LUI: opcode=0110111 (opcode literal found in RTL)" in asked, asked[:400]
+    assert "ECALL: opcode=1110011 funct3=000 (no opcode literal found in RTL)" in asked
+    assert asked.count("opcode=") == 40
+    with mock.patch.object(docs, "get_client", return_value=fake_client(error=ConnectionError("down"))):
+        r = docs.isa_spec_cross_referencer(str(rtl), spec_path="rv32i")
+    assert r["implemented"] == [] and r["missing"] == [] and len(r["unclear"]) == 40, r
+    assert r["details"]["ECALL"]["evidence"].startswith("no opcode literal found") and "unavailable" in r["details"]["ADD"]["evidence"]
+
+    # A spaced [6 : 2] slice with a 5-bit literal still counts as the R-type opcode.
+    assert "0110011" in docs._opcode_literals("assign r = (instr[6 : 2] == 5'b01100);")
+    # Oversized file, even one with no literals and a non-decoder name (bit-test
+    # decoding is possible): truncated, not dropped, and "missing" for an opcode
+    # that does appear somewhere becomes unclear. ECALL has no literal in ANY
+    # file, so the model's "missing" stands (Codex review, round 2).
+    (rtl / "execute.v").write_text(
+        "module execute(input [6:0] op, output y);\n"
+        + "  wire [31:0] pad_signal_with_a_long_name;\n" * 400 + "endmodule\n", encoding="utf-8")
+    calls = []
+    with mock.patch.object(docs, "get_client", return_value=fake_client(reply, sink=calls)):
+        r = docs.isa_spec_cross_referencer(str(rtl))
+    assert r["context_truncated"] == ["execute.v"] and "execute.v" in calls[0]["messages"][1]["content"], r
+    assert "partly shown" in r["details"]["SUB"]["evidence"] and "SUB" in r["unclear"], r
+    assert r["missing"] == ["ECALL"], r
+    (rtl / "execute.v").unlink()
+    (tmp2 / "spec.txt").write_text("Instructions: ADD SUB MULX\n", encoding="utf-8")
+    r = docs.isa_spec_cross_referencer(str(rtl), spec_path=str(tmp2 / "spec.txt"))
+    assert r["status"] == "ok" and "MULX" in r["defined_but_not_implemented"], "spec-file mode still works"
+    schema = next(s for s in docs.SCHEMAS if s["function"]["name"] == "isa_spec_cross_referencer")
+    assert schema["function"]["parameters"]["required"] == ["rtl_dir"]
+    print("isa_spec_cross_referencer: RV32I opcode scan + model merge, outage, spec-file mode: OK")
+finally:
+    shutil.rmtree(tmp2, ignore_errors=True)
 
 print("\nSKILL FIX TESTS PASSED")

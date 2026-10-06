@@ -16,8 +16,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from ..config import settings
-from ..llm import get_client
+from ..llm import get_client, json_completion
+from .vcd import format_value, read_vcd
 
 
 _IS_WINDOWS = os.name == "nt"
@@ -233,15 +233,11 @@ def _removed_hazard_logic(diff_text: str) -> list[str]:
 
 def _llm_hazard_review(diff_text: str) -> dict:
     try:
-        response = get_client().chat.completions.create(
-            model=settings.nebius_model,
-            messages=[
-                {"role": "system", "content": _HAZARD_REVIEW_PROMPT},
-                {"role": "user", "content": diff_text[:12000]},
-            ],
-            response_format={"type": "json_object"},
-        )
-        review = json.loads(response.choices[0].message.content or "{}")
+        content = json_completion(get_client(), [
+            {"role": "system", "content": _HAZARD_REVIEW_PROMPT},
+            {"role": "user", "content": diff_text[:12000]},
+        ], max_tokens=1500)
+        review = json.loads(content or "{}")
         if not isinstance(review, dict):
             raise ValueError("review is not a JSON object")
     except Exception as exc:  # noqa: BLE001 - the rule-based result still stands
@@ -284,35 +280,41 @@ def hazard_sanity_checker(diff_text: str, llm_review: bool = True) -> dict:
 
 def waveform_summarizer(vcd_path: str, signal: str, t_start: int = 0, t_end: int | None = None) -> dict:
     """Summarizes value changes for one signal in a VCD dump over a time
-    range, in plain terms instead of raw VCD syntax.
+    range, in plain terms instead of raw VCD syntax: full-width binary plus
+    hex/decimal, the value at the window start, and the dump's time unit.
     """
     path = Path(vcd_path)
     if not path.exists():
         return {"status": "error", "message": f"No VCD file at {vcd_path}"}
 
     try:
-        import vcdvcd  # type: ignore
-    except ImportError:
-        return {
-            "status": "unavailable",
-            "message": "The 'vcdvcd' package isn't installed. Run: pip install vcdvcd",
-        }
+        header, _ = read_vcd(path)
+    except (OSError, ValueError) as exc:
+        return {"status": "error", "message": f"Could not read VCD: {exc}"}
+    # Exact leaf or full-name match first, then substring matches.
+    exact = [v for v in header.vars if signal in (v.leaf, v.name)]
+    partial = [v for v in header.vars if signal in v.name and v not in exact]
+    candidates = exact or partial
+    if not candidates:
+        return {"status": "not_found", "message": f"No signal matching '{signal}' in {vcd_path}",
+                "available": [v.name for v in header.vars][:40]}
 
-    vcd = vcdvcd.VCDVCD(str(path))
-    matches = [name for name in vcd.references_to_ids if signal in name]
-    if not matches:
-        return {"status": "not_found", "message": f"No signal matching '{signal}' in {vcd_path}"}
-
-    sig_name = matches[0]
-    sig_id = vcd.references_to_ids[sig_name]
-    tv = vcd.data[sig_id].tv  # list of (time, value)
+    var = candidates[0]
+    _, changes = read_vcd(path, want={var.code})
+    tv = changes[var.code]
+    before = [(t, v) for t, v in tv if t <= t_start]  # value in effect at t_start
     window = [(t, v) for t, v in tv if t >= t_start and (t_end is None or t <= t_end)]
 
     return {
         "status": "ok",
-        "signal": sig_name,
+        "signal": var.name,
+        "width_bits": var.size,
+        "time_unit": header.timescale or "unknown",
+        "other_matches": [v.name for v in candidates[1:10]],
+        "value_at_start": format_value(before[-1][1], var.size) if before else None,
         "transitions_in_window": len(window),
-        "changes": [{"time": t, "value": v} for t, v in window[:100]],
+        "distinct_values": len({v for _, v in window}),
+        "changes": [{"time": t, **format_value(v, var.size)} for t, v in window[:100]],
         "note": "Truncated to first 100 transitions." if len(window) > 100 else None,
     }
 

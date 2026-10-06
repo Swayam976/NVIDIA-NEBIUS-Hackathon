@@ -63,7 +63,7 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 | `waveform_summarizer` | Summarizes a VCD dump around a signal/time range |
 | `modify_module` | Generates a diff for a requested RTL change (review only) |
 | `apply_diff` | Writes a previously generated diff to disk — **asks for confirmation** |
-| `isa_spec_cross_referencer` | Diffs ISA spec mnemonics against RTL implementation |
+| `isa_spec_cross_referencer` | Checks which RV32I instructions the RTL implements (or diffs a spec file's mnemonics against it) |
 | `spec_drafting_assistant` | Drafts spec/README text from current project state |
 | `changelog_generator` | Turns git history into a readable changelog |
 | `commit_to_summary` | "What did I do this week" from git log |

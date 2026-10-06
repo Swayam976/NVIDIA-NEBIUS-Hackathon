@@ -234,6 +234,9 @@ def guarded_tools(ws: Workspace) -> tuple[list[dict], dict[str, Callable[..., di
             try:
                 kwargs = {k: v for k, v in kwargs.items() if k in allowed_args[name]}
                 for k in _PATH_ARGS & kwargs.keys():
+                    # spec_path "" / "rv32i" selects the built-in RV32I list, not a file.
+                    if k == "spec_path" and str(kwargs[k]).strip().lower() in ("", "rv32i", "builtin:rv32i"):
+                        continue
                     kwargs[k] = str(ws.resolve(str(kwargs[k])))
                 if "project" in kwargs and not _SLUG_RE.match(str(kwargs["project"])):
                     raise SandboxError(f"Unknown project '{kwargs['project']}'.")
