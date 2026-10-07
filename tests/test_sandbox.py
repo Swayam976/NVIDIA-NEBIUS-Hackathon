@@ -40,8 +40,8 @@ try:
     schemas, impls = sandbox.guarded_tools(ws)
     names = {s["function"]["name"] for s in schemas}
     assert "apply_diff" not in names and "apply_diff" not in impls, "model must never get apply_diff in the demo"
-    assert len(names) == 20
-    print("guarded_tools: apply_diff withheld from the model, 20 tools offered: OK")
+    assert len(names) == 21
+    print("guarded_tools: apply_diff withheld from the model, 21 tools offered: OK")
 
     # --- guarded tool calls ---
     (outside / "secret.v").write_text("module s; endmodule\n", encoding="utf-8")
@@ -103,6 +103,12 @@ try:
         r = impls["generate_testbench"](**kwargs)
         assert r["status"] == "error", (kwargs, r)
     print("guarded generate_testbench: module and target confined, no overwrite: OK")
+    for kwargs in ({"rtl_path": str(outside / "x.v"), "tb_path": "rtl/x_tb.v"},
+                   {"rtl_path": "rtl/x.v", "tb_path": "../../x_tb.v"},
+                   {"rtl_path": "rtl/alu.v", "tb_path": "rtl/x_tb.v"}):  # exists
+        r = impls["create_module"](requirements="a register", module_name="x", repo_root=".", **kwargs)
+        assert r["status"] == "error", (kwargs, r)
+    print("guarded create_module: both new paths confined, no overwrite: OK")
 
     # Smuggled kwargs (not in the tool schema) are dropped, not passed through.
     seen = {}

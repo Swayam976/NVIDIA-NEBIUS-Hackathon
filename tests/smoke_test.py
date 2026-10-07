@@ -28,7 +28,7 @@ shutil.copytree(memory.MEMORY_DIR, _tmp_memory)
 memory.MEMORY_DIR = _tmp_memory
 
 print(f"Loaded {len(TOOL_SCHEMAS)} tool schemas, {len(TOOL_IMPLS)} implementations.")
-assert len(TOOL_SCHEMAS) == 21, f"expected 21 skills, found {len(TOOL_SCHEMAS)}"
+assert len(TOOL_SCHEMAS) == 22, f"expected 22 skills, found {len(TOOL_SCHEMAS)}"
 
 # --- memory.py round-trip ---
 projects = memory.list_projects()

@@ -45,7 +45,7 @@ src/copilot/
   config.py      - env/config loading
   memory.py      - reads/writes memory/projects/*.md
   llm.py         - Nemotron client + tool-calling loop
-  tools/         - the 21 skills, as callable tools with JSON schemas
+  tools/         - the 22 skills, as callable tools with JSON schemas
   cli.py         - REPL entrypoint
 memory/projects/ - one markdown file per hardware project (persistent state)
 ```
@@ -74,6 +74,7 @@ memory/projects/ - one markdown file per hardware project (persistent state)
 | `testbench_auditor` | Checks every expected-value computation in a testbench against the RTL (and spec); reports mismatches with file:line, changes nothing |
 | `generate_rtl` | Creates a NEW module from plain-English requirements: interface spec + listed assumptions, repo style, lint + compile + interface check in a temp copy (max 3 rounds), then a new-file diff for `apply_diff` — never overwrites, never writes outside the repo |
 | `generate_testbench` | Creates a NEW self-checking testbench (reset, one test per requirement, edge cases, PASS/FAIL + summary, VCD), audits its expected values, runs it in a temp copy and, if it fails, says whether the RTL or the testbench is wrong (file:line); new-file diff for `apply_diff` |
+| `create_module` | "Create module X that does Y" end to end: spec + assumptions → RTL → self-checking testbench → lint + simulation with debug-and-fix rounds (`verify_loop`, max 3) in a temp copy, with a coverage gate (one check per requirement) and a final re-audit → ONE approval prompt listing every new file |
 | `verify_loop` | Closed loop for one change: in a temp copy, edits the RTL and the testbenches that use it, runs every affected testbench plus lint, debugs and fixes failures (max 3 rounds), then hands ONE combined diff to `apply_diff` — your files are untouched until you say yes |
 
 ## Web demo

@@ -1,4 +1,5 @@
-"""Skills that create NEW files: generate_rtl, generate_testbench.
+"""Skills that create NEW files: generate_rtl, generate_testbench, and
+create_module (both, verified together through verify_loop).
 
 Requirements -> interface spec + assumptions (docs.draft_interface_spec) ->
 module (Nemotron, given the spec and a style sample read from the repo) ->
@@ -11,6 +12,7 @@ it refuses to overwrite and stays inside the repo root. No git anywhere.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -321,23 +323,27 @@ def _inputs(requirements: str, spec_path: str, module_name: str, target_path: st
     return text, root, target, connect
 
 
-def rtl_rounds(text: str, module: str, root: Path, target: Path, connect: list[Path], spec: dict,
-               style: dict, proj: Path, compile_check) -> tuple[str, list[dict], dict]:
-    """Generate the module and check it in the temp copy `proj` (a copy of
-    root), feeding errors back, at most _MAX_ROUNDS model calls. Returns
-    (code, rounds, last check)."""
-    language, rule = _LANGUAGE[target.suffix.lower()]
-    t_target = proj / target.relative_to(root)
-    t_connect = [proj / c.relative_to(root) for c in connect]
-    messages = [
+def _rtl_messages(text: str, module: str, suffix: str, spec: dict, style: dict) -> list[dict]:
+    language, rule = _LANGUAGE[suffix]
+    return [
         {"role": "system", "content": _RTL_PROMPT.format(language=language, language_rule=rule, module=module)},
         {"role": "user", "content": (f"Interface spec:\n{json.dumps(spec, indent=1)}\n\nRequirements:\n{text}\n\n"
                                      f"Repository style facts: {json.dumps(style['facts'])}\n"
                                      + (f"Style sample ({style['facts']['sample_files'][0]}):\n{style['excerpt']}\n"
                                         if style["excerpt"] else ""))},
     ]
+
+
+def rtl_rounds(text: str, module: str, root: Path, target: Path, connect: list[Path], spec: dict,
+               style: dict, proj: Path, compile_check, max_rounds: int = _MAX_ROUNDS) -> tuple[str, list[dict], dict]:
+    """Generate the module and check it in the temp copy `proj` (a copy of
+    root), feeding errors back, at most max_rounds model calls. Returns
+    (code, rounds, last check)."""
+    t_target = proj / target.relative_to(root)
+    t_connect = [proj / c.relative_to(root) for c in connect]
+    messages = _rtl_messages(text, module, target.suffix.lower(), spec, style)
     rounds, code, check = [], "", {}
-    for rnd in range(1, _MAX_ROUNDS + 1):
+    for rnd in range(1, max_rounds + 1):
         code, notes = _ask_code(messages, "verilog")
         t_target.parent.mkdir(parents=True, exist_ok=True)
         if not _inside(t_target, proj):
@@ -457,7 +463,15 @@ task, loops for repeated operations.
 Timing discipline for clocked designs (most testbench bugs are here): change inputs only at the falling clock edge; \
 check outputs at the next falling edge, i.e. after the rising edge that updates them has fully settled, never at \
 the rising edge itself; update the expected_* reference model in the same step as the inputs that cause the \
-change, following the module's stated latency."""
+change, following the module's stated latency.
+Prefer directed sequences with literal expected values (e.g. write 8'hA1, 8'hB2, 8'hC3, then read them back and \
+expect exactly those values in order) over a cycle-accurate reference model, and check outputs and flags once the \
+operation has completed and the enables are low, except in tests that are specifically about simultaneous \
+operations. Initialise every expected_* variable before its first check. Put the watchdog in its own initial \
+block with a generous limit (at least 100000 time units), so it can only fire if the test really hangs. Make at \
+least one PASS/FAIL check for EVERY requirement and edge case (data read back in order, full, empty, overflow and \
+underflow attempts, simultaneous operations, reset), and write every section completely: never leave a section \
+unfinished or a check skipped."""
 _TB_LANGUAGE = {
     ".v": ("Plain Verilog-2005 (no SystemVerilog constructs): declare every variable at module level, never "
            "inside a task body or an unnamed begin/end block."),
@@ -524,20 +538,10 @@ def tb_rounds(module_code: str, module: str, text: str, style: dict, t_module: P
     from .debugging import diagnose_failure, testbench_auditor  # local: avoids an import cycle
     from .verification import testbench_runner
 
-    tb_name = t_tb.stem
     copy_root = copy_root or t_module.parent  # an RTL culprit must be a file of the copy
     allow_dump = compile_check is None  # the web demo forbids dump files
-    dump_rule = _DUMP_RULE.format(vcd=f"{tb_name}.vcd", tb_name=tb_name) if allow_dump else _NO_DUMP_RULE
-    iface = module_interface(module_code, module) or {}
     rtl_dir = str(t_module.parent)  # sibling RTL the module may instantiate
-    messages = [
-        {"role": "system", "content": _TB_PROMPT.format(tb_name=tb_name, module=module, dump_rule=dump_rule,
-                                                        language_rule=_TB_LANGUAGE[t_tb.suffix.lower()])},
-        {"role": "user", "content": (f"Requirements:\n{text}\n\nModule {module} ({t_module.name}):\n{module_code}\n"
-                                     f"Parsed interface: {json.dumps(iface, default=list)}\n"
-                                     f"Repository testbench style facts: {json.dumps(style['facts'])}\n"
-                                     + (f"Style sample:\n{style['excerpt']}\n" if style["excerpt"] else ""))},
-    ]
+    messages = _tb_messages(module_code, module, text, style, t_module, t_tb, allow_dump)
     # Generated files: the testbench, and the module only if it is new too.
     generated = {t_tb.resolve(), *([t_module.resolve()] if module_is_new else [])}
     guard = _new_files_guard(generated, allow_dump, compile_check)
@@ -662,6 +666,91 @@ def _hints(errors: list[str], suffix: str) -> list[str]:
     return hints
 
 
+def _tb_messages(module_code: str, module: str, text: str, style: dict, t_module: Path, t_tb: Path,
+                 allow_dump: bool) -> list[dict]:
+    tb_name = t_tb.stem
+    dump_rule = _DUMP_RULE.format(vcd=f"{tb_name}.vcd", tb_name=tb_name) if allow_dump else _NO_DUMP_RULE
+    iface = module_interface(module_code, module) or {}
+    return [
+        {"role": "system", "content": _TB_PROMPT.format(tb_name=tb_name, module=module, dump_rule=dump_rule,
+                                                        language_rule=_TB_LANGUAGE[t_tb.suffix.lower()])},
+        {"role": "user", "content": (f"Requirements:\n{text}\n\nModule {module} ({t_module.name}):\n{module_code}\n"
+                                     f"Parsed interface: {json.dumps(iface, default=list)}\n"
+                                     f"Repository testbench style facts: {json.dumps(style['facts'])}\n"
+                                     + (f"Style sample:\n{style['excerpt']}\n" if style["excerpt"] else ""))},
+    ]
+
+
+def tb_draft(module_code: str, module: str, text: str, style: dict, t_module: Path, t_tb: Path,
+             spec_file: Path, compile_check, rtl_dir: Path | None = None) -> dict:
+    """create_module's testbench step (simulation and its fixes are
+    verify_loop's rounds): write the testbench, check it is safe and
+    instantiates the module (one retry), audit its expected values against
+    the RTL/spec and fix high-severity findings once. Writes t_tb in the
+    temp copy. Returns {"code", "audit", ...} or {"blocked"/"error": msg}."""
+    from .debugging import testbench_auditor  # local: avoids an import cycle
+
+    allow_dump = compile_check is None
+    messages = _tb_messages(module_code, module, text, style, t_module, t_tb, allow_dump)
+
+    def structural(code: str) -> list[str]:
+        if bad := generated_risks(code, allow_dump):
+            return [f"The testbench must not use {', '.join(bad[:4])} (only the waveform dump is allowed)."]
+        if not _instantiates(_STRIP_RE.sub(" ", code), module):
+            return [f"The testbench never instantiates {module}: add `{module} dut (...)` with named connections."]
+        return []
+
+    code, problems = "", []
+    for _ in range(2):
+        code, _ = _ask_code(messages, "testbench")
+        if not (problems := structural(code)):
+            break
+        messages += [{"role": "assistant", "content": json.dumps({"testbench": code})},
+                     {"role": "user", "content": _feedback(code, t_tb.name, problems, [])}]
+    if problems:
+        return {"blocked" if generated_risks(code, allow_dump) else "error": problems[0]}
+    t_tb.parent.mkdir(parents=True, exist_ok=True)
+    t_tb.write_text(code, encoding="utf-8")
+    # Compile once here and repair once, so the loop's rounds start from a testbench that builds.
+    from .verification import testbench_runner
+    guard = _new_files_guard({t_tb.resolve(), t_module.resolve()}, allow_dump, compile_check)
+    for _ in range(2):  # up to two compile repairs before the loop's rounds start
+        run = testbench_runner(module_path=str(t_module), tb_path=str(t_tb), rtl_dir=str(rtl_dir or t_module.parent),
+                               compile_check=guard)
+        if run.get("status") != "compile_error":
+            break
+        errors = [l.replace(str(t_tb.parent), ".") for l in run.get("stderr", "").splitlines() if l.strip()][:20]
+        messages = messages + [{"role": "assistant", "content": json.dumps({"testbench": code})},
+                               {"role": "user", "content": _feedback(code, t_tb.name, errors,
+                                                                     _hints(errors, t_tb.suffix.lower()))}]
+        fixed, _ = _ask_code(messages, "testbench")
+        if structural(fixed):
+            break
+        code = fixed
+        t_tb.write_text(code, encoding="utf-8")
+    audit = testbench_auditor(tb_path=str(t_tb), module_path=str(t_module), rtl_dir=str(rtl_dir or t_module.parent),
+                              spec_path=str(spec_file))
+    findings = audit.get("findings", []) if audit.get("status") == "ok" else []
+    blocking = [f for f in findings if f.get("severity") == "high" or f.get("source") == "rule"]
+    if audit.get("status") == "no_expected_values":
+        blocking = [{"line": 1, "explanation": "no expected values found: compute them in variables named "
+                     "expected_* so they can be checked against the RTL and spec", "severity": "high"}]
+    summary = (f"{len(blocking)} issue(s) fixed" if blocking else "clean") if audit.get("status") == "ok" \
+        and audit.get("coverage") == "complete" else f"incomplete ({audit.get('coverage') or audit.get('status')})"
+    if blocking:
+        errors = [f"{t_tb.name}:{f['line']}: expected value wrong: {f['explanation']}" for f in blocking]
+        fix_messages = messages + [{"role": "assistant", "content": json.dumps({"testbench": code})},
+                                   {"role": "user", "content": _feedback(code, t_tb.name, errors, [])}]
+        fixed, _ = _ask_code(fix_messages, "testbench")
+        if structural(fixed):
+            summary = f"{len(blocking)} issue(s) found; the fix was unusable, kept the first version"
+        else:
+            code = fixed
+            t_tb.write_text(code, encoding="utf-8")
+    return {"code": code, "audit": summary,
+            "audit_findings": [f"{t_tb.name}:{f['line']}: {f['explanation']}" for f in findings][:10]}
+
+
 def _module_source(module_path: str, root: Path) -> tuple[Path, str, bool]:
     """(path, code, pending): an existing module file inside the repo, or one
     just generated and still waiting in the pending store as a new file."""
@@ -760,6 +849,187 @@ def generate_testbench(
             "pending_diff": {"diff_id": diff_id, "files": [rel]}, "note": note}
 
 
+# ---------------------------------------------------------- create_module
+
+def create_module(
+    requirements: str,
+    module_name: str,
+    rtl_path: str,
+    tb_path: str,
+    repo_root: str,
+    spec_path: str = "",
+    connect_to: list[str] | None = None,
+    compile_check: Callable[[list[Path]], str | None] | None = None,
+) -> dict:
+    """"Create module X that does Y", end to end, in a temp copy of the repo:
+    interface spec + assumptions -> RTL (generate_rtl's step, one repair) ->
+    self-checking testbench (generate_testbench's step, audited) -> lint and
+    simulation with debug-and-fix rounds (verify_loop, max 3 rounds) -> ONE
+    pending diff holding every new file, for a single apply_diff approval.
+    Writes nothing to the repo; the temp copy is always deleted."""
+    from .verify_loop import execute  # local: verify_loop imports this package's helpers
+
+    try:
+        text, root, target, connect = _inputs(requirements, spec_path, module_name, rtl_path, repo_root, connect_to)
+        tb_target = check_new_file_path(str(root), tb_path)
+        if tb_target.suffix.lower() not in (".v", ".sv"):
+            raise ValueError("The testbench file must end in .v or .sv.")
+        if tb_target == target:
+            raise ValueError("rtl_path and tb_path must be different files.")
+    except (ValueError, NewFilePathError, OSError) as exc:
+        return {"status": "error", "message": str(exc)}
+    if not (_tool_available("iverilog") and _tool_available("vvp")):
+        return {"status": "unavailable", "message": "iverilog/vvp not found on PATH; the new module can't be verified."}
+    style_rtl = style_sample(root, target, testbench=False)
+    style_tb = style_sample(root, tb_target, testbench=True)
+    report: dict = {}
+    # Simulation searches one RTL folder: the common folder of the new module and
+    # every connect_to file (only modules the testbench needs are compiled).
+    rtl_root = Path(os.path.commonpath([str(target.parent), *(str(c.parent) for c in connect)]))
+
+    def seed(copy, t_module: Path, t_tb: Path) -> dict:
+        try:
+            spec = draft_interface_spec(text, module_name, style_rtl["facts"], connect)
+        except Exception as exc:  # noqa: BLE001 - no spec, no module
+            return {"error": f"Could not draft the interface spec ({type(exc).__name__}: {exc})."}
+        report.update(spec={k: spec.get(k) for k in ("summary", "parameters", "ports", "clock", "reset", "latency",
+                                                     "behavior")}, assumptions=spec["assumptions"])
+        code, rtl_rounds_done, check = rtl_rounds(text, module_name, root, target, connect, spec, style_rtl,
+                                                  copy.root, compile_check, max_rounds=2)
+        report["rtl"] = {"rounds": rtl_rounds_done, "compile": check["compile"], "lint": check["lint"],
+                         "interface": check.get("interface")}
+        if check.get("blocked") or check.get("unsafe"):
+            return {"blocked": check.get("blocked") or check["errors"][0]}
+        copy.write(t_module, code)
+        spec_file = copy.base / "requirements.md"
+        spec_file.write_text(f"{text}\n\nInterface spec:\n{json.dumps(spec, indent=1)}\n", encoding="utf-8")
+        t_rtl_dir = copy.root / rtl_root.relative_to(root)
+        tb = tb_draft(code, module_name, text, style_tb, t_module, t_tb, spec_file, compile_check, t_rtl_dir)
+        if tb.get("blocked") or tb.get("error"):
+            return tb
+        copy.write(t_tb, tb["code"])
+        report["testbench"] = {"audit": tb["audit"], "audit_findings": tb["audit_findings"]}
+
+        allow_dump = compile_check is None
+        t_connect = [copy.root / c.relative_to(root) for c in connect]
+
+        def fixer(target_file: Path, kind: str, errors: list[str]) -> dict:
+            """Fix a file this flow created with its own generator: its prompt, the
+            failing lines in context, a minimal-fix request; then one check (compile
+            for the testbench; compile + lint + interface for the RTL) and one
+            repair inside the same round. Writes nothing: the loop applies it."""
+            from .verification import testbench_runner
+            is_tb = target_file.resolve() == t_tb.resolve()
+            key = "testbench" if is_tb else "verilog"
+            base = (_tb_messages(t_module.read_text(encoding="utf-8"), module_name, text, style_tb, t_module, t_tb,
+                                 allow_dump) if is_tb else
+                    _rtl_messages(text, module_name, target.suffix.lower(), spec, style_rtl))
+            current = target_file.read_text(encoding="utf-8")
+            hints = _hints(errors, target_file.suffix.lower())
+            msgs = base + [{"role": "assistant", "content": json.dumps({key: current})},
+                           {"role": "user", "content": _feedback(current, target_file.name, errors, hints)}]
+            code, notes = _ask_code(msgs, key)
+            for attempt in range(2):
+                with tempfile.TemporaryDirectory(prefix="copilot_fixcheck_") as d:
+                    trial = Path(d) / target_file.name
+                    trial.write_text(code, encoding="utf-8")
+                    if is_tb:
+                        if bad := generated_risks(code, allow_dump):
+                            return {"status": "error", "message": f"the fix uses {', '.join(bad[:3])}"}
+                        if not _instantiates(_STRIP_RE.sub(" ", code), module_name):
+                            return {"status": "error", "message": f"the fix no longer instantiates {module_name}"}
+                        run = testbench_runner(module_path=str(t_module), tb_path=str(trial), rtl_dir=str(t_rtl_dir),
+                                               compile_check=_new_files_guard({trial.resolve(), t_module.resolve()},
+                                                                              allow_dump, compile_check))
+                        problems = ([l.replace(str(d), ".") for l in run.get("stderr", "").splitlines() if l.strip()][:20]
+                                    if run.get("status") == "compile_error" else [])
+                    else:
+                        result = check_new_rtl(trial, module_name, t_connect, compile_check, spec)
+                        if result.get("unsafe") or result.get("blocked"):
+                            return {"status": "error", "message": result["errors"][0]}
+                        problems = [] if result["ok"] or (result["compile"] == "ok" and not result["lint_ran"]
+                                                          and result["interface"] != "mismatch") else result["errors"]
+                        problems = [p.replace(str(d), ".") for p in problems]
+                if not problems or attempt == 1:
+                    break
+                msgs += [{"role": "assistant", "content": json.dumps({key: code})},
+                         {"role": "user", "content": _feedback(code, target_file.name, problems,
+                                                               _hints(problems, target_file.suffix.lower()))}]
+                code, notes = _ask_code(msgs, key)
+            return {"status": "ok", "new_content": code,
+                    "explanation": (notes or f"{kind} fix")[:300]}
+
+        behaviours = [b for b in spec.get("behavior", []) if str(b).strip()]
+
+        def coverage_check(run: dict) -> list[str]:
+            """A passing testbench must make at least one check per behaviour the
+            spec lists, plus the reset check; fewer means parts are untested."""
+            checks = int(run.get("pass_lines", 0)) + int(run.get("fail_lines", 0))
+            has_reset = bool(spec.get("reset"))
+            needed = len(behaviours) + (1 if has_reset else 0)
+            if checks >= needed:
+                return []
+            return [f"The testbench makes only {checks} check(s), but the spec has {len(behaviours)} behaviour(s)"
+                    + (" plus reset" if has_reset else "") + ": add at least one directed PASS/FAIL check for each "
+                    "of these: " + "; ".join(behaviours)]
+
+        def final_check(t_mod: Path, t_bench: Path) -> dict:
+            """After the rounds: the final RTL still matches the spec, the final
+            testbench still drives the real module, and it passes a complete
+            expected-value audit with nothing serious."""
+            from .debugging import testbench_auditor
+            bench = t_bench.read_text(encoding="utf-8")
+            if not _instantiates(_STRIP_RE.sub(" ", bench), module_name) or generated_risks(bench, allow_dump):
+                report["final_check"] = {"testbench": "does not instantiate the module (or is unsafe)"}
+                return {"status": "testbench_invalid", "message": f"the final testbench no longer drives {module_name}"}
+            mismatches = interface_mismatches(t_mod.read_text(encoding="utf-8"), module_name, spec)
+            audit = testbench_auditor(tb_path=str(t_bench), module_path=str(t_mod), rtl_dir=str(t_rtl_dir),
+                                      spec_path=str(spec_file))
+            serious = [f for f in audit.get("findings", []) if f.get("severity") == "high" or f.get("source") == "rule"]
+            report["final_check"] = {"interface": mismatches or "matches the spec",
+                                     "audit": audit.get("coverage") or audit.get("status"),
+                                     "audit_findings": [f"{t_bench.name}:{f['line']}: {f['explanation']}" for f in serious]}
+            if mismatches:
+                return {"status": "interface_mismatch", "message": "; ".join(mismatches[:3])}
+            if serious:
+                return {"status": "audit_findings", "message": f"{len(serious)} expected value(s) disagree with the "
+                        "RTL/spec in the final testbench"}
+            if audit.get("status") != "ok" or audit.get("coverage") != "complete":
+                return {"status": "passed_audit_incomplete", "message": "the final expected-value audit was incomplete"}
+            return {"status": "passed"}
+
+        return {"changes": [f"{target.name}: new module (compile {check['compile']}, interface "
+                            f"{check.get('interface')})", f"{tb_target.name}: new testbench (audit {tb['audit']})"],
+                "lint_extra": [copy.root / c.relative_to(root) for c in connect],
+                "new_files": [target.relative_to(root).as_posix(), tb_target.relative_to(root).as_posix()],
+                "final_check": final_check, "fixer": fixer, "coverage_check": coverage_check}
+
+    result = execute(f"Create module {module_name}: {text[:400]}", root, target, tb_target, rtl_root,
+                     compile_check, seed=seed)
+    result.pop("seed", None)
+    out = {
+        "status": result.get("status"),
+        "final_status": result.get("final_status"),
+        "module": module_name,
+        "files": [target.relative_to(root).as_posix(), tb_target.relative_to(root).as_posix()],
+        **report,
+        "style": {"rtl": style_rtl["facts"], "testbench": style_tb["facts"]},
+        **{k: result[k] for k in ("attempts", "attempts_table", "verification", "unverified", "lint_not_run",
+                                  "stopped_early", "diff", "pending_diff", "model_calls", "temp_copy_removed",
+                                  "message") if k in result},
+    }
+    if result.get("pending_diff"):
+        out["note"] = (f"Nothing was written. {len(result['pending_diff']['files'])} new file(s) wait as ONE pending "
+                       f"diff {result['pending_diff']['diff_id']}: apply_diff shows them all and creates them only on "
+                       "the user's explicit yes; a no changes nothing.")
+        if result.get("status") == "tests_incomplete":
+            out["note"] = ("Its tests pass, but they don't yet check every behaviour of the spec; review before "
+                           "deciding. " + out["note"])
+        elif result.get("status") != "passed":
+            out["note"] = "The new module still fails its checks; review before deciding. " + out["note"]
+    return out
+
+
 SCHEMAS = [
     {
         "type": "function",
@@ -813,4 +1083,31 @@ SCHEMAS = [
     },
 ]
 
-IMPLS = {"generate_rtl": generate_rtl, "generate_testbench": generate_testbench}
+SCHEMAS.append({
+    "type": "function",
+    "function": {
+        "name": "create_module",
+        "description": (
+            "\"Create module X that does Y\" end to end: interface spec + assumptions, the RTL, a self-checking "
+            "testbench, then lint + simulation with debug-and-fix rounds (verify_loop, max 3) in a temp copy of the "
+            "repo, and ONE pending diff with every new file for a single apply_diff approval. Writes nothing itself; "
+            "show the spec, assumptions, attempts table and diff, then ask before apply_diff."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requirements": {"type": "string", "description": "What the module must do, in plain English."},
+                "module_name": {"type": "string"},
+                "rtl_path": {"type": "string", "description": "New RTL file, relative to repo_root (e.g. rtl/fifo.v)."},
+                "tb_path": {"type": "string", "description": "New testbench file (e.g. tb/fifo_tb.v)."},
+                "repo_root": {"type": "string", "description": "The project repo; nothing is written outside it."},
+                "spec_path": {"type": "string", "description": "Optional spec file."},
+                "connect_to": {"type": "array", "items": {"type": "string"},
+                               "description": "Optional existing RTL files it must connect to."},
+            },
+            "required": ["requirements", "module_name", "rtl_path", "tb_path", "repo_root"],
+        },
+    },
+})
+
+IMPLS = {"generate_rtl": generate_rtl, "generate_testbench": generate_testbench, "create_module": create_module}

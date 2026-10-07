@@ -409,7 +409,7 @@ try:
     print("verify_loop: risky edits never simulated, Vivado mem_init found, stale inputs stage nothing: OK")
 
     # --- review round 2: lint decides too ---
-    def fake_lint(path, compile_check):
+    def fake_lint(path, compile_check, extra=None):
         if "original" in Path(path).parts:
             return {"warnings": 0, "errors": ["%Error: alu.v:1:1: Cannot find module 'x'"]}  # pre-existing
         text = Path(path).read_text(encoding="utf-8")
@@ -427,7 +427,7 @@ try:
     assert "fix lint error" in r["attempts"][1]["change"] and r["model_calls"] == 4 and "BADLINT" not in r["diff"], r
     # A lint run the guard refuses stops the loop like a blocked simulation.
     root = project("p_lint_blocked")
-    with mock.patch.object(vl_mod, "_lint", side_effect=lambda path, cc: {"blocked": "nope"}
+    with mock.patch.object(vl_mod, "_lint", side_effect=lambda path, cc, extra=None: {"blocked": "nope"}
                            if "original" not in Path(path).parts else {"warnings": 0, "errors": []}):
         r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
     assert r["status"] == "blocked" and "lint alu.v: nope" in r["message"] and r["pending_diff"] is None, r
@@ -458,7 +458,7 @@ try:
     assert r["testbenches_not_run"] == {"sim/top_tb.v": "over the testbench limit"}, r
     # Lint that can't run on an edited file: no "complete" verification.
     root = project("p_nolint")
-    with mock.patch.object(vl_mod, "_lint", side_effect=lambda path, cc: {"unavailable": "unavailable"}):
+    with mock.patch.object(vl_mod, "_lint", side_effect=lambda path, cc, extra=None: {"unavailable": "unavailable"}):
         r = loop(root, Model({"alu.v": [GOOD], "alu_tb.v": [ALU_TB_NEW]}))
     assert r["status"] == "passed" and r["verification"] == "partial" and r["lint_not_run"] == {"rtl/alu.v": "unavailable"}
     print("verify_loop: path spaces kept, out-of-folder writes never run, edited tbs always run, lint gaps reported: OK")

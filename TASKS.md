@@ -24,10 +24,42 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 17 | New skill: verify_loop (closed loop: change -> test -> debug in a temp copy, max 3 rounds, one gated diff) | Claude | done |
 | 18 | Whole-copilot Codex review x3 + fixes | Claude | done |
 | 19 | New skill: generate_rtl (requirements -> spec + assumptions -> new module, lint + compile in a temp copy; apply_diff can create files) | Claude | done |
-| 20 | New skill: generate_testbench (self-checking tb, auditor, sim, RTL-or-tb verdict) + create_module flow | Claude | in progress (Claude) |
+| 20 | New skill: generate_testbench (self-checking tb, auditor, sim, RTL-or-tb verdict) + create_module flow | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-08, Claude, task 20 done: create_module (22 skills). "Create
+  module X that does Y": inputs validated (both new paths, no overwrite,
+  inside repo_root); verify_loop.execute(seed=...) runs everything in one
+  temp copy: seed = interface spec + assumptions, RTL (rtl_rounds, max 2
+  tries), testbench draft (structural checks, up to 2 compile repairs,
+  audit + one fix); then verify_loop rounds (max 3) with simulation, lint
+  and debug. New-files mode in verify_loop: no baseline for new files,
+  every testbench using the new module must pass, new files may only dump
+  a waveform, fixes to the NEW files go through the generator ("fixer":
+  its own prompt + failing lines + minimal-fix request + one in-round
+  check/repair), a coverage gate (passing testbench needs >= one check per
+  spec behaviour + reset), a final check (testbench still drives the
+  module, RTL interface still matches the spec, complete re-audit with no
+  serious findings), creations aborted if a target appears meanwhile, and
+  ONE pending diff with every file as a creation. Also fixed: empty repos
+  (copy folder now always created), compile errors read from the head of
+  the log (first errors) and fixed in the file the FIRST error names (a
+  cascade error had sent fixes to the RTL), connect_to files in other
+  folders simulated too. Codex round 1: final re-audit, final interface
+  check, connect_to sim search, file appearing mid-run (fixed); round 2:
+  testbenches using the new module required, DUT check on final testbench
+  (fixed). 2 rounds used. After the reviews (not Codex-reviewed): the
+  generator-based fixer, coverage gate, prompt rules (directed literal
+  checks, initialised expected_*, generous watchdog, every requirement
+  checked), tests_incomplete status. Live on hw-scratch (empty folder):
+  several runs while fixing the above (one "passed" with only 5 checks
+  hid a simultaneous read/write count bug -> coverage gate added); final
+  run: passed in round 1, 123 checks incl. simultaneous write+read, audit
+  clean, interface matches, 8 calls, ~136 s; folder untouched; pending diff
+  5aa5a79e left unapplied for Swayam to review. New check:
+  tests/test_create_module.py.
 
 - 2026-10-07, Claude, task 20 part 1: generate_testbench (21 skills).
   Module from the repo or still pending from generate_rtl; style facts

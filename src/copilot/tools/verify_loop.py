@@ -26,7 +26,7 @@ from typing import Callable
 
 from ..llm import count_model_calls
 from .debugging import diagnose_failure
-from .hdl_safety import access_features, escaping_access, new_risky_features, nonliteral_paths
+from .hdl_safety import access_features, escaping_access, is_safe_dump, new_risky_features, nonliteral_paths
 from .module_modifier import propose_edit, stage_pending, unified_diff_text
 from .rtl_files import _DEF_RE, _instantiates, _read_code, design_files, is_testbench, project_files
 from .verification import _tool_available, _vivado_mem_init_dirs, lint_checker, testbench_runner
@@ -76,6 +76,7 @@ def _copy_project(root: Path, dest: Path) -> dict[Path, str]:
     if total > _COPY_MAX_BYTES:
         raise ValueError(f"{total // (1024 * 1024)} MB under {root.name}; pass a narrower project_dir.")
     hashes = {}
+    dest.mkdir(parents=True, exist_ok=True)  # even for an empty repo (create_module's first module)
     for f in files:
         rel = f.relative_to(root)
         target = dest / rel
@@ -183,9 +184,15 @@ def _sim_guard(copy: _Copy, original_root: Path, outer):
         if not copy.edited:
             return None  # the user's own, unchanged code
         old_paths = [original_of(f) for f in new_paths]
+        # Files the loop created (no original): they may only dump a waveform
+        # into the run folder, and that dump is not "added access".
+        new_only = [f for f, o in zip(new_paths, old_paths) if not o.exists()]
+        new_file_features = access_features(read(new_only))
+        if bad := sorted(k for k in new_file_features if not is_safe_dump(k)):
+            return f"A new file uses {', '.join(bad[:3])}; not simulated."
         old_x, old_raw = _expand(old_paths), read(old_paths)
         old_f = access_features(old_x if old_x is not None else old_raw) + access_features(old_raw)
-        if added := sorted((new_f - old_f).keys()):
+        if added := sorted(k for k in (new_f - old_f) if not (is_safe_dump(k) and k in new_file_features)):
             return (f"The loop's edits add file/process access ({', '.join(added[:4])}); "
                     "not simulated unreviewed.")
         edited = [f for f in new_paths if f in copy.edited]
@@ -258,11 +265,11 @@ def _verdict(run: dict) -> str:
     return str(status).replace("_", " ")
 
 
-def _lint(path: Path, compile_check) -> dict:
+def _lint(path: Path, compile_check, extra: list[Path] | None = None) -> dict:
     """{"warnings": n, "errors": [...]}, {"blocked": reason} or {"unavailable": status}."""
     if compile_check is not None and (reason := compile_check([path])):
         return {"blocked": reason}
-    res = lint_checker(str(path))
+    res = lint_checker(str(path), extra_files=[str(e) for e in extra or []])
     if res.get("status") in ("clean", "issues_found"):
         # lint_checker lists every error separately; "warnings" is capped for display.
         errors = res.get("errors", [w for w in res.get("warnings", []) if w.startswith("%Error")])
@@ -305,20 +312,29 @@ def _lint_text(copy: _Copy, results: dict[Path, dict], baseline: dict[Path, dict
 
 
 def _compile_error_file(stderr: str, copy: _Copy) -> Path | None:
-    """The file iverilog blames, preferring files the loop edited."""
+    """The file named by the FIRST error line (later errors often cascade into
+    other files), preferring files the loop edited when names are ambiguous."""
     candidates = [*copy.edited, *project_files(copy.root, (".v", ".sv", ".vh", ".svh"))]
-    for p in candidates:
-        forms = {str(p), str(p.resolve()), p.as_posix(), p.resolve().as_posix()}
-        if any(f + ":" in stderr for f in forms):
-            return p
-    for p in candidates:
-        if re.search(rf"(?:^|[\\/\s]){re.escape(p.name)}:\d+:", stderr, re.MULTILINE):
-            return p
+    for line in stderr.splitlines():
+        for p in candidates:
+            forms = {str(p), str(p.resolve()), p.as_posix(), p.resolve().as_posix()}
+            if any(line.startswith(f + ":") or (" " + f + ":") in line for f in forms):
+                return p
+        for p in candidates:
+            if re.search(rf"(?:^|[\\/\s]){re.escape(p.name)}:\d+:", line):
+                return p
     return None
 
 
 def _unified(old: str, new: str, label: str) -> str:
     return unified_diff_text(old, new, label)
+
+
+def _no_fix(fix: dict | None, default: str) -> str:
+    """Why a round ends without a fix: the refusal reason if there is one."""
+    if fix and fix.get("status") not in (None, "ok") and fix.get("message"):
+        return f"The proposed fix was refused: {fix['message']}."
+    return default
 
 
 def _table(attempts: list[dict]) -> str:
@@ -367,11 +383,19 @@ def verify_loop(
         return {"status": "error", "message": "rtl_dir must be a folder inside project_dir."}
     if not (_tool_available("iverilog") and _tool_available("vvp")):
         return {"status": "unavailable", "message": "iverilog/vvp not found on PATH; the loop needs a simulator."}
+    return execute(goal, root, module, tb, rtl_root, compile_check)
 
+
+def execute(goal: str, root: Path, module: Path, tb: Path, rtl_root: Path, compile_check,
+            seed: Callable[["_Copy", Path, Path], dict] | None = None) -> dict:
+    """The loop proper (inputs already validated). With `seed`, module and
+    testbench are NEW files: seed(copy, t_module, t_tb) creates them in the
+    temp copy (round 1's change) and returns {"changes": [...]} or
+    {"error"/"blocked": message}; the result stages them as new files."""
     with count_model_calls() as calls:
         tmp = Path(tempfile.mkdtemp(prefix="copilot_verify_")).resolve()
         try:
-            result = _run(goal, root, tmp, module, tb, rtl_root, compile_check, calls)
+            result = _run(goal, root, tmp, module, tb, rtl_root, compile_check, calls, seed)
         except Exception as exc:  # noqa: BLE001 - report, and still clean up below
             result = {"status": "error", "message": f"verify_loop stopped: {type(exc).__name__}: {exc}",
                       "pending_diff": None}
@@ -383,7 +407,7 @@ def verify_loop(
 
 
 def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Path,
-         compile_check, calls: list[int]) -> dict:
+         compile_check, calls: list[int], seed=None) -> dict:
     proj = tmp / "project"
     hashes = _copy_project(root, proj)
     # Program/memory files Vivado keeps outside the project folder: snapshot them too.
@@ -393,6 +417,14 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
     shutil.copytree(proj, tmp / "original")  # pristine copy: what the guard compares against
     compile_check = _sim_guard(copy, tmp / "original", compile_check)
     t_module, t_tb, t_rtl = proj / module.relative_to(root), proj / tb.relative_to(root), proj / rtl_root.relative_to(root)
+    seeded: dict = {}
+    if seed is not None:
+        start = calls[0]
+        seeded = seed(copy, t_module, t_tb)
+        if seeded.get("error") or seeded.get("blocked"):
+            return {"status": "blocked" if seeded.get("blocked") else "error", "pending_diff": None,
+                    "message": copy.untemp(seeded.get("blocked") or seeded.get("error")), "seed": seeded}
+        t_rtl.mkdir(parents=True, exist_ok=True)
     if not (t_module.is_file() and t_tb.is_file()):
         return {"status": "error", "message": "module_path or tb_path sits in a generated folder that is not copied."}
 
@@ -408,11 +440,12 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         return {t: testbench_runner(tb_path=str(t), rtl_dir=str(t_rtl), compile_check=compile_check,
                                     data_dirs=data_dirs) for t in tests}
 
-    baseline = run_all()
-    if baseline[t_tb].get("status") in ("unavailable", "blocked", "ambiguous_design", "error"):
+    # New files have no "before"; only other testbenches get a baseline.
+    baseline = run_all() if seed is None else {}
+    if seed is None and baseline[t_tb].get("status") in ("unavailable", "blocked", "ambiguous_design", "error"):
         return {"status": "not_runnable", "message": copy.untemp(baseline[t_tb].get("message", baseline[t_tb]["status"])),
                 "testbench_status": baseline[t_tb]["status"], "pending_diff": None}
-    for t in [t for t in tests if baseline[t].get("status") == "blocked"]:
+    for t in [t for t in tests if baseline.get(t, {}).get("status") == "blocked"]:
         # The user's own testbench writes outside the run folder: never run it again.
         not_run[t] = copy.untemp(baseline[t].get("message", "blocked"))
         tests.remove(t)
@@ -420,7 +453,16 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
             direct.remove(t)
     # Done = the target testbench passes, nothing that passed before breaks,
     # and every testbench the loop itself edited passes.
-    must_pass = [t_tb] + [t for t in tests[1:] if baseline[t].get("status") == "pass"]
+    if seed is not None:
+        must_pass = list(tests)  # a NEW module: every testbench that now uses it must pass
+    else:
+        must_pass = [t_tb] + [t for t in tests[1:] if baseline.get(t, {}).get("status") == "pass"]
+    if seed is not None:
+        # Round 1's change was the seed: the new module and testbench.
+        lint_base = {t_module: {"warnings": 0, "errors": []}}  # every lint error of a new file is new
+        return _rounds(goal, root, tmp, proj, copy, t_module, t_tb, t_rtl, tests, must_pass, not_run, baseline,
+                       lint_base, [t for t in copy.edited if t != t_module], [], seeded.get("changes", []),
+                       start, hashes, data_hashes, data_dirs, compile_check, calls, seeded)
     lint_base = {t_module: _lint(t_module, compile_check)}
 
     # Round 1's change: the RTL, then the testbenches that instantiate it.
@@ -449,16 +491,46 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
     if not copy.edited:
         return {"status": "no_change", "message": "The model made no change for this goal; nothing to test.",
                 "explanation": rtl.get("explanation"), "pending_diff": None}
+    return _rounds(goal, root, tmp, proj, copy, t_module, t_tb, t_rtl, tests, must_pass, not_run, baseline,
+                   lint_base, tb_changed, tb_skipped, changes, start, hashes, data_hashes, data_dirs,
+                   compile_check, calls, {})
+
+
+def _rounds(goal, root, tmp, proj, copy, t_module, t_tb, t_rtl, tests, must_pass, not_run, baseline, lint_base,
+            tb_changed, tb_skipped, changes, start, hashes, data_hashes, data_dirs, compile_check, calls,
+            seeded) -> dict:
+    """Test / debug / fix rounds on the temp copy, then one combined diff
+    (new files staged as creations)."""
+
+    def run_all() -> dict[Path, dict]:
+        return {t: testbench_runner(tb_path=str(t), rtl_dir=str(t_rtl), compile_check=compile_check,
+                                    data_dirs=data_dirs) for t in tests}
+
+    fixer = seeded.get("fixer")
+    new_set = {(proj / rel).resolve() for rel in seeded.get("new_files", [])}
+
+    def fix_for(target: Path, kind: str, errors: list[str], instruction: str) -> dict:
+        """A file the loop CREATED is fixed by its generator (its own prompt, the
+        failing lines, an in-round compile repair); any other file by propose_edit."""
+        if fixer is not None and target.resolve() in new_set:
+            try:
+                return fixer(target, kind, [copy.untemp(e) for e in errors])
+            except Exception as exc:  # noqa: BLE001 - one failed fix must not end the loop's report
+                return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
+        return _propose(target, instruction)
 
     attempts: list[dict] = []
+    only_coverage_left = False
     change, change_calls = "; ".join(changes), calls[0] - start
     status, stop_reason, final_diagnosis_calls = "still_failing", "", 0
     for rnd in range(1, _MAX_ROUNDS + 1):
         runs = run_all()
-        lint_now = {p: _lint(p, compile_check) for p in copy.edited if not is_testbench(p) or p == t_module}
+        lint_now = {p: _lint(p, compile_check, seeded.get("lint_extra"))
+                    for p in copy.edited if not is_testbench(p) or p == t_module}
         for p in lint_now:
-            if p not in lint_base:  # baseline = the same file as the user has it
-                lint_base[p] = _lint(tmp / "original" / p.relative_to(proj), compile_check)
+            if p not in lint_base:  # baseline = the same file as the user has it (none for a new file)
+                original = tmp / "original" / p.relative_to(proj)
+                lint_base[p] = _lint(original, compile_check) if original.exists() else {"warnings": 0, "errors": []}
         row = {
             "round": rnd,
             "change": copy.untemp(change),
@@ -477,7 +549,9 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         lint_errors = {p: e for p in lint_now if (e := _new_lint_errors(lint_now[p], lint_base.get(p, {})))}
         required = must_pass + [t for t in tests if t in copy.edited and t not in must_pass]
         failing = [t for t in required if runs[t].get("status") != "pass"]
-        if not failing and not lint_errors:
+        # create_module: a passing testbench must also cover the spec (one check per behaviour).
+        coverage = seeded["coverage_check"](runs[t_tb]) if not failing and seeded.get("coverage_check") else []
+        if not failing and not lint_errors and not coverage:
             status = "passed"
             break
         last = rnd == _MAX_ROUNDS
@@ -485,19 +559,33 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         change = ""
         bad = failing[0] if failing else None
         run = runs[bad] if bad else {}
-        if bad is None:
+        only_coverage_left = bad is None and bool(coverage) and not lint_errors
+        if only_coverage_left:
+            # Tests pass but don't test enough of the spec: the testbench needs more checks.
+            row["root_cause"] = copy.untemp(f"{t_tb.name} passes but is incomplete: {coverage[0]}")
+            if not last:
+                fix = fix_for(t_tb, "coverage", coverage, f"{coverage[0]} Change nothing else.")
+                if fix["status"] == "ok" and fix["new_content"] != t_tb.read_text(encoding="utf-8"):
+                    if refused := _accept(copy, t_tb, fix["new_content"]):
+                        stop_reason = refused
+                    else:
+                        change = f"{t_tb.name}: added checks ({fix['explanation']})"
+                else:
+                    stop_reason = _no_fix(fix, "The model added no checks.")
+        elif bad is None:
             # Tests pass, but the change brought new lint errors: not done yet.
             target, errors = next(iter(lint_errors.items()))
             row["root_cause"] = copy.untemp(f"new lint error(s) in {target.name}: {errors[0]}")
             if not last:
-                fix = _propose(target, _LINT_FIX_INSTRUCTION.format(errors="\n".join(errors[:20]), goal=goal))
+                fix = fix_for(target, "lint", errors[:20],
+                              _LINT_FIX_INSTRUCTION.format(errors="\n".join(errors[:20]), goal=goal))
                 if fix["status"] == "ok" and fix["new_content"] != target.read_text(encoding="utf-8"):
                     if refused := _accept(copy, target, fix["new_content"]):
                         stop_reason = refused
                     else:
                         change = f"{target.name}: fix lint error ({fix['explanation']})"
                 else:
-                    stop_reason = "The model proposed no fix for the lint errors."
+                    stop_reason = _no_fix(fix, "The model proposed no fix for the lint errors.")
         elif run.get("status") == "compile_error":
             stderr = run.get("stderr", "")
             first = next((l for l in stderr.splitlines() if l.strip()), "compile error")
@@ -507,22 +595,30 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
                 if target is None:
                     stop_reason = "iverilog's errors don't name a file in the project, so no fix was attempted."
                 else:
-                    fix = _propose(target, _COMPILE_FIX_INSTRUCTION.format(stderr=stderr[-3000:], goal=goal))
+                    fix = fix_for(target, "compile", [l for l in stderr.splitlines() if l.strip()][:20],
+                                  _COMPILE_FIX_INSTRUCTION.format(stderr=stderr[-3000:], goal=goal))
                     if fix["status"] == "ok" and fix["new_content"] != target.read_text(encoding="utf-8"):
                         if refused := _accept(copy, target, fix["new_content"]):
                             stop_reason = refused
                         else:
                             change = f"{target.name}: fix compile error ({fix['explanation']})"
                     else:
-                        stop_reason = "The model proposed no fix for the compile error."
+                        stop_reason = _no_fix(fix, "The model proposed no fix for the compile error.")
         elif run.get("status") == "fail_or_unknown":
+            use_fixer = fixer is not None and not last
             diag, fix = diagnose_failure(str(bad), rtl_dir=str(t_rtl), compile_check=compile_check,
-                                         propose=None if last else _propose, data_dirs=data_dirs)
+                                         propose=None if (last or use_fixer) else _propose, data_dirs=data_dirs)
             if diag.get("status") == "failing":
                 where = Path(diag["file"]).name if diag.get("file") else "?"
                 row["root_cause"] = copy.untemp(
                     f"{bad.name}: {where}:{diag.get('line') or '?'} ({diag.get('confidence')}): {diag.get('root_cause')}")
                 target = Path(diag["file"]) if diag.get("file") else None
+                if use_fixer and target is not None and _inside(target, proj):
+                    info = [f"Bug at {where}:{diag.get('line') or '?'}: {diag.get('root_cause')}",
+                            *([f"Suggested fix: {diag['fix_instruction']}"] if diag.get("fix_instruction") else []),
+                            *[f"Simulation output: {line}" for line in run.get("first_failures", [])[:5]]]
+                    fix = fix_for(target, "debug", info,
+                                  f"{diag.get('fix_instruction') or diag.get('root_cause')} Change nothing else.")
                 if not last:
                     if fix is not None and fix.get("status") == "ok" and target is not None and _inside(target, proj) \
                             and fix["new_content"] != target.read_text(encoding="utf-8"):
@@ -531,7 +627,7 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
                         else:
                             change = f"{target.name}: {fix['explanation']}"
                     else:
-                        stop_reason = diag.get("_note") or "The model proposed no fix for this failure."
+                        stop_reason = _no_fix(fix, diag.get("_note") or "The model proposed no fix for this failure.")
             else:
                 row["root_cause"] = copy.untemp(f"{bad.name}: {diag.get('message', diag.get('status'))}")
                 stop_reason = "The failure could not be diagnosed."
@@ -544,6 +640,13 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         if stop_reason:
             break
 
+    # create_module: the FINAL files must still meet the spec and pass a full
+    # expected-value audit (the rounds may have changed both).
+    final_check: dict = {}
+    if status == "passed" and seeded.get("final_check"):
+        final_check = seeded["final_check"](t_module, t_tb)
+        status = final_check.get("status", "passed")
+
     # Every input the verdict rests on must be unchanged on disk; otherwise
     # the result is about files that no longer exist in that form.
     changed = [rel.as_posix() for rel, h in hashes.items()
@@ -554,19 +657,34 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
                 "message": "These files changed on disk while the loop ran, so its results are stale and no diff "
                 f"was staged: {', '.join(changed[:5])}. Run it again."}
 
-    # One combined diff: temp copy vs the user's files.
-    files, diffs = [], []
+    # One combined diff: temp copy vs the user's files (new files against /dev/null).
+    files, diffs, creates = [], [], set()
+    planned_new = set(seeded.get("new_files", []))
     for t in copy.edited:
         rel = t.relative_to(proj)
         real = root / rel
-        old, new = real.read_text(encoding="utf-8"), t.read_text(encoding="utf-8")
+        if rel.as_posix() in planned_new and real.exists():
+            return {"status": "error", "pending_diff": None, "attempts": attempts, "attempts_table": _table(attempts),
+                    "message": f"{rel.as_posix()} appeared in the repo while this ran; it was meant to be a new file "
+                    "and is never overwritten. Nothing was staged."}
+        new = t.read_text(encoding="utf-8")
+        if not real.exists():
+            creates.add(str(real))
+            files.append((str(real), new))
+            diffs.append(unified_diff_text("", new, str(real), new_file=True))
+            continue
+        old = real.read_text(encoding="utf-8")
         if new != old:
             files.append((str(real), new))
             diffs.append(_unified(old, new, str(real)))
-    diff_id = stage_pending(files) if files else None
+    diff_id = stage_pending(files, creates=creates, repo_root=str(root)) if files else None
 
     rounds = len(attempts)
-    final = "passed" if status == "passed" else f"still failing after {rounds} round(s)"
+    if status == "still_failing" and only_coverage_left:
+        status = "tests_incomplete"  # everything that runs passes, but the spec is not covered
+    final = {"passed": "passed", "still_failing": f"still failing after {rounds} round(s)",
+             "tests_incomplete": f"tests pass but do not cover the spec after {rounds} round(s)"}.get(
+        status, status.replace("_", " "))
     # Lint that could not run on an edited file in the last round: not verified.
     lint_missing = {copy.rel(p): r.get("unavailable") for p, r in lint_now.items() if "unavailable" in r} \
         if attempts else {}
@@ -577,7 +695,9 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
             f"pending diff {diff_id}: apply it only with apply_diff, which shows it and needs the user's explicit "
             "yes. Passing tests are not an approval." if diff_id else
             "Nothing was written to your files, and the temp copy has been deleted. No net change to stage.")
-    if status != "passed":
+    if status not in ("passed", "still_failing"):
+        note = f"The tests pass, but the final check did not: {final_check.get('message', status)} " + note
+    elif status != "passed":
         note = "The tests still fail with this change; review it before deciding. " + note
     elif unverified:
         note = (f"Passed, but {len(unverified)} affected testbench(es) already failed before the change and "
@@ -599,8 +719,11 @@ def _run(goal: str, root: Path, tmp: Path, module: Path, tb: Path, rtl_root: Pat
         **({"stopped_early": stop_reason} if stop_reason else {}),
         **({"final_diagnosis_calls": final_diagnosis_calls} if final_diagnosis_calls else {}),
         "diff": "".join(diffs) or "(no changes)",
-        "pending_diff": {"diff_id": diff_id, "files": [str(Path(p).relative_to(root).as_posix()) for p, _ in files]}
+        "pending_diff": {"diff_id": diff_id, "files": [str(Path(p).relative_to(root).as_posix()) for p, _ in files],
+                         "new_files": sorted(Path(p).relative_to(root).as_posix() for p in creates)}
         if diff_id else None,
+        **({"seed": seeded} if seeded else {}),
+        **({"final_check": final_check} if final_check else {}),
         "note": note,
     }
 

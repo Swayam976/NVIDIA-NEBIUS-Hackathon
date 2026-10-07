@@ -201,7 +201,7 @@ def check_hdl_sources(paths: list[Path], timeout_s: int = 20) -> str | None:
 # ------------------------------------------------------------ guarded tools
 
 _PATH_ARGS = {"module_path", "tb_path", "file_path", "vcd_path", "spec_path", "rtl_dir", "repo_path", "project_dir",
-              "repo_root", "target_path"}
+              "repo_root", "target_path", "rtl_path"}
 _PATH_LIST_ARGS = {"connect_to"}
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _HDL_CHECKED = {"lint_checker": ("file_path",)}  # testbench_runner: whole workspace, see below
@@ -248,7 +248,8 @@ def guarded_tools(ws: Workspace) -> tuple[list[dict], dict[str, Callable[..., di
                 for p in kwargs.get("projects") or []:
                     if not _SLUG_RE.match(str(p)):
                         raise SandboxError(f"Unknown project '{p}'.")
-                if name in ("testbench_runner", "debug_failing_test", "verify_loop", "generate_rtl", "generate_testbench"):
+                if name in ("testbench_runner", "debug_failing_test", "verify_loop", "generate_rtl", "generate_testbench",
+                            "create_module"):
                     # The runner may compile any HDL file it can reach (rtl_dir, files next
                     # to the testbench), so every HDL file in the workspace must pass.
                     hdl = sorted(p for p in ws.root.rglob("*") if p.is_file() and p.suffix.lower() in (".v", ".sv", ".vh", ".svh"))

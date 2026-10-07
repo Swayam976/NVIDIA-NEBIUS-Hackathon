@@ -25,14 +25,15 @@ Nebius x NVIDIA Global AI Hackathon, Personal AI track.
   Endpoints, MysteryBox)
 - Interface: CLI (`python -m src.copilot.cli`)
 
-## The 21 skills
+## The 22 skills
 Project state tracker, Decision log, Cross-project linker, Testbench runner,
 Waveform summarizer, Lint checker, Hazard sanity checker, Module modifier
 (generates diff), apply_diff (approval-gated), ISA spec cross-referencer,
 Spec drafting assistant, Changelog generator, Commit-to-summary, Regression
 spotter, Next-step suggester, Daily/weekly brief, Debug failing test, Testbench
 auditor, Verify loop (closed change-test-debug loop), Generate RTL (new module
-from requirements; new files only via apply_diff), Generate testbench.
+from requirements; new files only via apply_diff), Generate testbench, Create module
+(spec -> RTL -> testbench -> verify loop -> one approval).
 
 ## Hard constraints
 1. `apply_diff` must always show the diff and wait for an explicit human yes.
@@ -53,6 +54,6 @@ from requirements; new files only via apply_diff), Generate testbench.
 
 ## Checks to run before calling anything done
 - `python tests/smoke_test.py` (mocked LLM, no network)
-- `python tests/test_apply_gate.py`, `tests/test_brief.py`, `tests/test_sandbox.py`, `tests/test_skills.py`, `tests/test_multifile.py`, `tests/test_debugging.py`, `tests/test_auditor.py`, `tests/test_verify_loop.py`, `tests/test_hardening.py`, `tests/test_generation.py`, `tests/test_generate_tb.py`,
+- `python tests/test_apply_gate.py`, `tests/test_brief.py`, `tests/test_sandbox.py`, `tests/test_skills.py`, `tests/test_multifile.py`, `tests/test_debugging.py`, `tests/test_auditor.py`, `tests/test_verify_loop.py`, `tests/test_hardening.py`, `tests/test_generation.py`, `tests/test_generate_tb.py`, `tests/test_create_module.py`,
   `tests/test_verification.py`, `tests/test_web_demo.py` (needs `pip install -r demo/requirements.txt`)
 - Any new unit tests under `tests/`

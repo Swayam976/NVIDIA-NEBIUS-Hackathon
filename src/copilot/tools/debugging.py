@@ -301,6 +301,7 @@ def diagnose_failure(
         "line": line,
         "confidence": confidence,
         "evidence": evidence,
+        "fix_instruction": instruction,
         "_note": note,
     }, proposal
 

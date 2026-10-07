@@ -220,6 +220,18 @@ def _run_capped(cmd: list[str], timeout_s: int, cwd: str) -> tuple[str, int | No
     return text, (None if state["over"] else code), timed_out, state["over"]
 
 
+def _head(text: str, limit: int = 2000) -> str:
+    """The first lines of compiler output, up to `limit` characters, cut at a
+    line end: the first errors are the cause, later ones usually cascade."""
+    out, used = [], 0
+    for line in text.strip().splitlines():
+        if used + len(line) + 1 > limit:
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
 def _display(path: Path, bases: list[Path]) -> str:
     for base in bases:
         try:
@@ -353,11 +365,11 @@ def testbench_runner(
                 if defining and defining[0] not in files:
                     extra.append(defining[0])
             if not extra:
-                return {"status": "compile_error", "stderr": compiled.stderr.strip()[-2000:],
+                return {"status": "compile_error", "stderr": _head(compiled.stderr),
                         "compiled_files": [_display(f, bases) for f in files][:60]}
             files += extra
         else:
-            return {"status": "compile_error", "stderr": compiled.stderr.strip()[-2000:],
+            return {"status": "compile_error", "stderr": _head(compiled.stderr),
                     "compiled_files": [_display(f, bases) for f in files][:60]}
 
         log, exit_code, timed_out, too_much = _run_capped(["vvp", str(out_bin)], timeout_s, tmp)
