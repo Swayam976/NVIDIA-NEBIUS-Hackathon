@@ -5,9 +5,9 @@ agent loop can use.
 
 from __future__ import annotations
 
-from . import debugging, docs, module_modifier, project_state, verification, verify_loop, workflow
+from . import debugging, docs, generation, module_modifier, project_state, verification, verify_loop, workflow
 
-_MODULES = [project_state, verification, module_modifier, docs, workflow, debugging, verify_loop]
+_MODULES = [project_state, verification, module_modifier, docs, workflow, debugging, verify_loop, generation]
 
 TOOL_SCHEMAS: list[dict] = [schema for mod in _MODULES for schema in mod.SCHEMAS]
 TOOL_IMPLS: dict = {name: fn for mod in _MODULES for name, fn in mod.IMPLS.items()}

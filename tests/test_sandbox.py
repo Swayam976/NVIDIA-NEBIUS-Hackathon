@@ -40,8 +40,8 @@ try:
     schemas, impls = sandbox.guarded_tools(ws)
     names = {s["function"]["name"] for s in schemas}
     assert "apply_diff" not in names and "apply_diff" not in impls, "model must never get apply_diff in the demo"
-    assert len(names) == 18
-    print("guarded_tools: apply_diff withheld from the model, 18 tools offered: OK")
+    assert len(names) == 19
+    print("guarded_tools: apply_diff withheld from the model, 19 tools offered: OK")
 
     # --- guarded tool calls ---
     (outside / "secret.v").write_text("module s; endmodule\n", encoding="utf-8")
@@ -88,6 +88,15 @@ try:
     finally:
         sandbox.TOOL_IMPLS["testbench_auditor"] = real
     print("guarded isa_spec_cross_referencer: RV32I mode in the workspace, spec paths still confined: OK")
+
+    # generate_rtl: repo_root, target_path and every connect_to path stay in the workspace.
+    for kwargs in ({"repo_root": str(outside), "target_path": "x.v"},
+                   {"repo_root": ".", "target_path": str(outside / "x.v")},
+                   {"repo_root": ".", "target_path": "rtl/x.v", "connect_to": ["../../etc/passwd"]},
+                   {"repo_root": ".", "target_path": "rtl/x.v", "connect_to": "rtl/alu.v"}):
+        r = impls["generate_rtl"](requirements="a register", module_name="x", **kwargs)
+        assert r["status"] == "error", (kwargs, r)
+    print("guarded generate_rtl: repo root, target and connect_to paths confined: OK")
 
     # Smuggled kwargs (not in the tool schema) are dropped, not passed through.
     seen = {}

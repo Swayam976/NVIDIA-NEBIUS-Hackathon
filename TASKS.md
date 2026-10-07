@@ -23,9 +23,34 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 16 | New skill: testbench_auditor (expected-value model vs RTL/spec, report only) | Claude | done |
 | 17 | New skill: verify_loop (closed loop: change -> test -> debug in a temp copy, max 3 rounds, one gated diff) | Claude | done |
 | 18 | Whole-copilot Codex review x3 + fixes | Claude | done |
+| 19 | New skill: generate_rtl (requirements -> spec + assumptions -> new module, lint + compile in a temp copy; apply_diff can create files) | Claude | done |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-07, Claude, task 19 done: generate_rtl (tools/generation.py), 20
+  skills. apply_diff can now CREATE files, through the same gate: a new-file
+  entry ("create": true + repo_root) is shown against /dev/null, its
+  fingerprint is marked as a creation, and at apply time it is re-checked
+  (inside repo_root, no "..", nothing under .git/, must not exist) and
+  written with exclusive create (a file that appears meanwhile is never
+  overwritten, and the rollback only removes files this apply created, plus
+  folders it made). Every existing check unchanged. generate_rtl: inputs
+  validated before any model call; style facts from 1-2 repo files (clock,
+  reset name/polarity, indent); docs.draft_interface_spec (spec drafting
+  step: ports/widths/params/reset/latency/behaviour + assumptions, 1 call);
+  module (Verilog-2005 for .v) in a temp copy of the repo, checked by
+  iverilog -g2005 compile, Verilator lint (connect_to files read
+  explicitly) and an interface-vs-spec check (ports, directions, widths,
+  parameter defaults, no extra params); errors fed back, max 3 rounds;
+  generated code with file/process access or `include is never compiled
+  and never staged. Status passed / compiled_not_linted / still_failing.
+  Live (scratch folder): sync_fifo passed in 1 round, 2 calls, ~25 s, clean
+  lint; scratch folder untouched. Codex round 1: lint-unavailable counted as
+  passed, connect_to lint resolution, no interface check (fixed); round 2:
+  create race (blocking, fixed with exclusive create), unsafe-in-every-round
+  crash/staging, parameter defaults/extras (fixed). 2 rounds used. New
+  check: tests/test_generation.py.
 
 - 2026-10-07, Claude, CLI resilience (found while guiding Swayam through a
   live run: a DNS blip, getaddrinfo failed, crashed the whole CLI). cli.main

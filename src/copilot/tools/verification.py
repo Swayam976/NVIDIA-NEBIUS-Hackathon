@@ -430,9 +430,15 @@ def testbench_runner(
     return result
 
 
-def lint_checker(file_path: str, timeout_s: int = 30) -> dict:
+def lint_checker(file_path: str, timeout_s: int = 30, search_dirs: list[str] | None = None,
+                 top: str = "", extra_files: list[str] | None = None) -> dict:
     """Runs Verilator in lint-only mode and translates warnings into a
     plain list instead of a raw log dump.
+
+    search_dirs / top / extra_files (internal, not in the tool schema):
+    folders Verilator searches for instantiated modules (-y), the top module
+    (--top-module) and source files read alongside (modules the file uses),
+    for linting a new module that connects to existing ones.
     """
     resolved = _resolve_verilator()
     if resolved is None:
@@ -440,7 +446,8 @@ def lint_checker(file_path: str, timeout_s: int = 30) -> dict:
     exe, env = resolved
 
     res = subprocess.run(
-        [exe, "--lint-only", "-Wall", file_path],
+        [exe, "--lint-only", "-Wall", *[a for d in (search_dirs or []) for a in ("-y", d)],
+         *(["--top-module", top] if top else []), *(extra_files or []), file_path],
         capture_output=True,
         text=True,
         timeout=timeout_s,

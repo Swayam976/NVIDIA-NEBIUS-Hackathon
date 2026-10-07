@@ -351,6 +351,69 @@ def changelog_generator(repo_path: str, since: str = "1.week") -> dict:
     return {"status": "ok", "entries": commits, "count": len(commits)}
 
 
+# ------------------------------------------------- interface spec (generate_rtl)
+
+_INTERFACE_SPEC_PROMPT = """\
+You turn plain-English hardware requirements into a short, precise interface spec for ONE new module. \
+Respond with ONLY a JSON object:
+{"summary": "<one sentence>",
+ "parameters": [{"name": "<NAME>", "default": "<value>", "description": "<short>"}],
+ "ports": [{"name": "<name>", "direction": "input" | "output" | "inout", "width": "<1, a number, or an \
+expression of the parameters, e.g. WIDTH>", "description": "<short>"}],
+ "clock": "<clock port name, or null if purely combinational>",
+ "reset": {"name": "<reset port>", "active": "low" | "high", "type": "sync" | "async"} or null,
+ "latency": "<e.g. 1 cycle from write to read; combinational>",
+ "behavior": ["<one testable requirement per item, including edge cases such as full/empty/overflow>"],
+ "assumptions": ["<every decision you made that the requirements did not state>"]}
+Use the requirements' names and polarities when given; otherwise follow the repository style facts. List every \
+choice the requirements left open under assumptions. Name only ports of the module itself."""
+
+_IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
+
+
+def interfaces_of(paths: list[Path]) -> str:
+    """`module(ports)` lines for the modules defined in these files, from the
+    same RTL-interface reader spec_drafting_assistant uses."""
+    lines = []
+    for path in paths:
+        defined = set(re.findall(r"\bmodule\s+([A-Za-z_]\w*)", path.read_text(encoding="utf-8", errors="ignore")))
+        text, names = module_interfaces(path.parent)
+        lines += [line for line, name in zip(text.splitlines(), names) if name in defined]
+    return "\n".join(dict.fromkeys(lines))
+
+
+def draft_interface_spec(requirements: str, module_name: str, style: dict, connect_to: list[Path]) -> dict:
+    """The spec-drafting step of generate_rtl: requirements -> interface spec
+    (ports, widths, parameters, reset, latency, behaviour) plus the
+    assumptions made. One model call (reasoning on, one retry without).
+    Raises ValueError if the reply is not a usable spec."""
+    connected = interfaces_of(connect_to) if connect_to else ""
+    user = (f"Module name: {module_name}\n\nRequirements:\n{requirements}\n\n"
+            f"Repository style facts: {json.dumps(style)}\n"
+            + (f"\nExisting modules it must connect to (match their port names and widths):\n{connected}\n"
+               if connected else ""))
+    messages = [{"role": "system", "content": _INTERFACE_SPEC_PROMPT}, {"role": "user", "content": user}]
+    try:
+        spec = json.loads(json_completion(get_client(), messages, max_tokens=12000, thinking=True) or "{}")
+    except Exception:  # noqa: BLE001 - cut off / malformed: one cheaper retry
+        spec = json.loads(json_completion(get_client(), messages, max_tokens=4000) or "{}")
+    if not isinstance(spec, dict):
+        raise ValueError("the interface spec is not a JSON object")
+    ports = spec.get("ports")
+    if not isinstance(ports, list) or not ports:
+        raise ValueError("the interface spec has no ports")
+    for port in ports:
+        if not (isinstance(port, dict) and _IDENT_RE.match(str(port.get("name", "")))
+                and port.get("direction") in ("input", "output", "inout")):
+            raise ValueError(f"malformed port in the interface spec: {port!r}")
+    params = spec.get("parameters") if isinstance(spec.get("parameters"), list) else []
+    spec["parameters"] = [p for p in params if isinstance(p, dict) and _IDENT_RE.match(str(p.get("name", "")))]
+    for key in ("behavior", "assumptions"):
+        spec[key] = [str(x) for x in spec.get(key) or [] if str(x).strip()] if isinstance(spec.get(key), list) else []
+    spec["module"] = module_name
+    return spec
+
+
 SCHEMAS = [
     {
         "type": "function",

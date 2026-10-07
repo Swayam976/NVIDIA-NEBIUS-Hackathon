@@ -20,6 +20,7 @@ from ..config import REPO_ROOT, settings
 from ..llm import get_client, note_model_call
 
 _PENDING_DIFFS_PATH = REPO_ROOT / ".copilot_pending_diffs.json"
+_open = open  # new files are created through this (exclusive mode); tests can fail it
 
 
 def _load_pending() -> dict:
@@ -84,13 +85,16 @@ def _tokens(line: str) -> list[str]:
     return _TOKEN_RE.findall(line)
 
 
-def unified_diff_text(old: str, new: str, path: str) -> str:
+def unified_diff_text(old: str, new: str, path: str, new_file: bool = False) -> str:
     """Unified diff of old -> new for `path`. A last line without a newline
     gets its own line plus git's "\\ No newline at end of file" marker, so a
-    removed and an added line can never run together on one display line."""
+    removed and an added line can never run together on one display line.
+    new_file: the file doesn't exist yet; shown against /dev/null (every
+    line added), as git does."""
     out = []
-    for line in difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True),
-                                     fromfile=f"a/{path}", tofile=f"b/{path}"):
+    for line in difflib.unified_diff([] if new_file else old.splitlines(keepends=True),
+                                     new.splitlines(keepends=True),
+                                     fromfile="/dev/null" if new_file else f"a/{path}", tofile=f"b/{path}"):
         if line.endswith("\n"):
             out.append(line)
         else:
@@ -161,17 +165,57 @@ def modify_module(module_path: str, instruction: str) -> dict:
     }
 
 
-def stage_pending(files: list[tuple[str, str]]) -> str:
+class NewFilePathError(ValueError):
+    """A path a new file may not be created at."""
+
+
+def check_new_file_path(repo_root: str, path: str) -> Path:
+    """Where a NEW file may be created: inside repo_root (absolute paths
+    elsewhere refused), no ".." anywhere in the path as given, nothing under
+    .git/, and not an existing file (that's modify_module's job). Returns the
+    resolved path or raises NewFilePathError. Checked when the file is
+    proposed and again by apply_diff right before writing."""
+    root = Path(repo_root).resolve()
+    if not root.is_dir():
+        raise NewFilePathError(f"Repo root '{repo_root}' is not a folder.")
+    raw = Path(str(path))
+    if any(part == ".." for part in raw.parts) or ".." in str(path).replace("\\", "/").split("/"):
+        raise NewFilePathError(f"'{path}': paths with '..' are not allowed.")
+    target = (raw if raw.is_absolute() else root / raw).resolve()
+    if target == root or not target.is_relative_to(root):
+        raise NewFilePathError(f"'{path}' is outside the repo root {root}.")
+    if any(part.lower() == ".git" for part in target.relative_to(root).parts):
+        raise NewFilePathError(f"'{path}': nothing may be written under .git/.")
+    if target.exists():
+        raise NewFilePathError(f"'{path}' already exists; refusing to overwrite it. Use modify_module to change it.")
+    return target
+
+
+def stage_pending(files: list[tuple[str, str]], creates: set[str] | frozenset[str] = frozenset(),
+                  repo_root: str | None = None) -> str:
     """Stores a proposed change (one or more (path, new_content)) under a new
     diff_id for apply_diff. Writes nothing to the target files. Several files
-    are one change: approved and applied all together or not at all."""
+    are one change: approved and applied all together or not at all.
+    Paths in `creates` are NEW files: they must pass check_new_file_path
+    against repo_root (re-checked by apply_diff) and are shown against
+    /dev/null."""
+    if creates and not repo_root:
+        raise NewFilePathError("New files need the repo root they are confined to.")
     diff_id = uuid.uuid4().hex[:8]
     pending = _load_pending()
-    files = [(p, c.replace("\r\n", "\n")) for p, c in files]
-    if len(files) == 1:
-        pending[diff_id] = {"module_path": files[0][0], "new_content": files[0][1]}
+    items = []
+    for path, content in files:
+        item = {"module_path": path, "new_content": content.replace("\r\n", "\n")}
+        if path in creates:
+            item["module_path"] = str(check_new_file_path(repo_root, path))
+            item["create"] = True
+        items.append(item)
+    if len(items) == 1:
+        pending[diff_id] = items[0]
     else:
-        pending[diff_id] = {"files": [{"module_path": p, "new_content": c} for p, c in files]}
+        pending[diff_id] = {"files": items}
+    if creates:
+        pending[diff_id]["repo_root"] = str(Path(repo_root).resolve())
     _save_pending(pending)
     return diff_id
 
@@ -186,11 +230,17 @@ def _encoded(new_content: str, original: bytes | None) -> bytes:
     return text.encode("utf-8")
 
 
+def _entry_items(entry: dict) -> list[dict]:
+    return entry["files"] if "files" in entry else [entry]
+
+
 def _entry_files(entry: dict) -> list[tuple[str, str]]:
     """(path, new_content) for every file a pending entry would write."""
-    if "files" in entry:
-        return [(f["module_path"], f["new_content"]) for f in entry["files"]]
-    return [(entry["module_path"], entry["new_content"])]
+    return [(f["module_path"], f["new_content"]) for f in _entry_items(entry)]
+
+
+def _creates(entry: dict) -> list[bool]:
+    return [bool(f.get("create")) for f in _entry_items(entry)]
 
 
 def pending_paths(entry: dict) -> list[str]:
@@ -210,7 +260,8 @@ def _fingerprint(module_path: str, current: str, new_content: str) -> str:
 def _entry_fingerprint(entry: dict, currents: list[str]) -> str:
     """Single-file entries keep the original fingerprint; a multi-file entry
     covers every file's path, shown state and new content, in order."""
-    parts = [_fingerprint(p, cur, new) for (p, new), cur in zip(_entry_files(entry), currents)]
+    parts = [_fingerprint(("create:" if create else "") + p, cur, new)
+             for (p, new), cur, create in zip(_entry_files(entry), currents, _creates(entry))]
     if "files" not in entry:
         return parts[0]
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
@@ -232,10 +283,10 @@ def preview_pending_diff(diff_id: str) -> tuple[str, str] | None:
     if entry is None:
         return None
     currents, diffs = [], []
-    for path, new_content in _entry_files(entry):
+    for (path, new_content), create in zip(_entry_files(entry), _creates(entry)):
         current = _current_content(path)
         currents.append(current)
-        diffs.append(unified_diff_text(current, new_content, path))
+        diffs.append(unified_diff_text(current, new_content, path, new_file=create))
     diff = "".join(diffs)
     return diff or "(no changes)", _entry_fingerprint(entry, currents)
 
@@ -279,6 +330,15 @@ def apply_diff(diff_id: str) -> dict:
     except (OSError, ValueError) as exc:
         _save_pending(pending)
         return {"status": "error", "message": f"Could not read a target file ({exc}). Nothing was written."}
+    # New files: still inside the repo root, still not existing (never overwrite).
+    for (path, _), create in zip(files, _creates(entry)):
+        if create:
+            try:
+                check_new_file_path(entry.get("repo_root", ""), path)
+            except NewFilePathError as exc:
+                _save_pending(pending)
+                return {"status": "declined", "message": f"{exc} Nothing was written."}
+
     if approved is None or approved != _entry_fingerprint(entry, currents):
         _save_pending(pending)  # any stale approval is cleared; the diff stays pending for re-review
         return {
@@ -293,22 +353,42 @@ def apply_diff(diff_id: str) -> dict:
     except OSError as exc:
         _save_pending(pending)
         return {"status": "error", "message": f"Could not read a target file ({exc}). Nothing was written."}
-    attempted = 0
+    attempted, made_dirs, created = 0, [], set()
+    new_files = {Path(p) for (p, _), create in zip(files, _creates(entry)) if create}
     try:
-        for (path, new_content), (_, original) in zip(files, originals):
+        for (path, new_content), (_, original), create in zip(files, originals, _creates(entry)):
             attempted += 1  # counted before the write: a failed write may still have truncated the file
-            Path(path).write_bytes(_encoded(new_content, original))
+            if create:
+                missing = [d for d in Path(path).parents if not d.exists()]
+                Path(path).parent.mkdir(parents=True, exist_ok=True)
+                made_dirs += reversed(missing)
+                # Exclusive create: if a file appeared since the check, this fails
+                # (FileExistsError) instead of overwriting something never shown.
+                handle = _open(path, "xb")
+                created.add(Path(path))
+                with handle:
+                    handle.write(_encoded(new_content, None))
+            else:
+                Path(path).write_bytes(_encoded(new_content, original))
     except OSError as exc:
         # All or nothing: restore every file touched, including the one that failed.
         not_restored = []
         for target, original in reversed(originals[:attempted]):
             try:
-                if original is None:
+                if target in new_files:
+                    if target in created:  # only ever remove a file this apply created
+                        target.unlink(missing_ok=True)
+                elif original is None:
                     target.unlink(missing_ok=True)
                 else:
                     target.write_bytes(original)
             except OSError:
                 not_restored.append(str(target))
+        for d in reversed(made_dirs):  # folders created for new files, deepest first
+            try:
+                d.rmdir()
+            except OSError:
+                pass
         _save_pending(pending)  # keep the proposal (approval already cleared) so it can be retried
         if not_restored:
             return {"status": "error", "files_not_restored": not_restored,
