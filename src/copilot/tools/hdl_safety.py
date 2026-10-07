@@ -179,7 +179,8 @@ def escaping_access(features: Counter) -> list[str]:
             found.append(k)
         elif task in _WRITE_PATH_TASKS and _path_is_literal(k):
             path = _split_top(k[k.index("(") + 1: -1])[0].strip()[1:-1]
-            if _LEAVES_RUN_DIR_RE.search(path):
+            # A backslash may be an escape ("\057" is "/"): never assume it stays local.
+            if _LEAVES_RUN_DIR_RE.search(path) or "\\" in path:
                 found.append(k)
     return sorted(found)
 
@@ -192,3 +193,23 @@ def nonliteral_writes(features: Counter) -> list[str]:
 def nonliteral_paths(features: Counter) -> list[str]:
     """Any file-path task whose path is not one literal ($readmemh(MEM_FILE))."""
     return sorted(k for k in features if _task(k) in _PATH_TASKS and not _path_is_literal(k))
+
+
+_DUMP_CONTROL_TASKS = frozenset({"dumpvars", "dumpon", "dumpoff", "dumpall", "dumpflush", "dumplimit"})
+
+
+def is_safe_dump(key: str) -> bool:
+    """A waveform-dump feature a GENERATED testbench may use: dump control
+    tasks (they write the dump file in the run folder), and $dumpfile with
+    one literal path that stays inside the run folder."""
+    task = _task(key)
+    if task in _DUMP_CONTROL_TASKS:
+        return True
+    if task == "dumpfile" and _path_is_literal(key):
+        path = _split_top(key[key.index("(") + 1: -1])[0].strip()[1:-1]
+        # Plain names only: no escapes (\057 is "/"), no absolute or ".." parts.
+        return bool(_SAFE_DUMP_NAME_RE.fullmatch(path)) and not _LEAVES_RUN_DIR_RE.search(path)
+    return False
+
+
+_SAFE_DUMP_NAME_RE = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")

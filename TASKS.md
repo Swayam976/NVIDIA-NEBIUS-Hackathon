@@ -24,9 +24,35 @@ Deadline: Oct 30, 2026, 1:00pm EDT
 | 17 | New skill: verify_loop (closed loop: change -> test -> debug in a temp copy, max 3 rounds, one gated diff) | Claude | done |
 | 18 | Whole-copilot Codex review x3 + fixes | Claude | done |
 | 19 | New skill: generate_rtl (requirements -> spec + assumptions -> new module, lint + compile in a temp copy; apply_diff can create files) | Claude | done |
+| 20 | New skill: generate_testbench (self-checking tb, auditor, sim, RTL-or-tb verdict) + create_module flow | Claude | in progress (Claude) |
 
 ## Handoff notes
 (Newest first. Who, what changed, what's next, rejected review findings and why.)
+
+- 2026-10-07, Claude, task 20 part 1: generate_testbench (21 skills).
+  Module from the repo or still pending from generate_rtl; style facts
+  from 1-2 repo testbenches; one generation call; per round (max 3):
+  safety (only a waveform dump into the run folder; no escapes in dump
+  paths), DUT-instantiation check, compile + simulate (no model call),
+  one same-round compile repair (numbered failing lines, minimal-fix
+  request, re-checked), testbench_auditor (only high/rule findings fed
+  back; others listed as notes; "passed" needs a complete audit), and on a
+  failing run debug_failing_test's diagnosis: testbench fault -> fed back
+  with the first failing lines; RTL fault -> stops with file:line (RTL
+  never touched). Guard for simulating generated files: preprocessed,
+  fails closed, no escaping writes, no non-literal file paths anywhere.
+  Web demo: no dumps asked or allowed. Live on the scratch folder took 4
+  tries: (1) auditor noise + a repeated Verilog-2005 compile error, (2)
+  syntax slips introduced by whole-file rewrites, (3) checks made at the
+  rising edge; fixed by compile-first ordering, high-only findings,
+  compile hints, line context + minimal-fix requests, same-round repair,
+  timing-discipline prompt. Try 4: RTL passed (4 calls), testbench passed
+  in round 2 with 54 checks, audit clean (5 calls, ~75 s); scratch folder
+  untouched. Codex round 1: non-literal paths in compiled inputs
+  (blocking), incomplete audit counted as pass, sibling RTL not found
+  (fixed); round 2: escaped dump paths (blocking), repairs skipping the DUT
+  check, unresolved culprit treated as RTL bug (fixed). 2 rounds used.
+  New check: tests/test_generate_tb.py. Next: create_module flow.
 
 - 2026-10-07, Claude, task 19 done: generate_rtl (tools/generation.py), 20
   skills. apply_diff can now CREATE files, through the same gate: a new-file

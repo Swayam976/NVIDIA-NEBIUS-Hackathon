@@ -235,6 +235,8 @@ try:
     assert r["status"] == "passed" and len(r["rounds"]) == 2 and r["rounds"][0]["compile"] == "failed", r["rounds"]
     retry = m.calls[2]["messages"][-1]["content"]
     assert "failed these checks" in retry and "syntax error" in retry.lower(), retry
+    assert "The lines they point at:" in retry and "|     end else if (en) begin" in retry, "numbered context shown"
+    assert "smallest change" in retry
     assert r["model_calls"] == 3
     # --- a lint error, fixed on retry ---
     root = repo("r3")

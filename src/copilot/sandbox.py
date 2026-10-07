@@ -248,7 +248,7 @@ def guarded_tools(ws: Workspace) -> tuple[list[dict], dict[str, Callable[..., di
                 for p in kwargs.get("projects") or []:
                     if not _SLUG_RE.match(str(p)):
                         raise SandboxError(f"Unknown project '{p}'.")
-                if name in ("testbench_runner", "debug_failing_test", "verify_loop", "generate_rtl"):  # compile HDL
+                if name in ("testbench_runner", "debug_failing_test", "verify_loop", "generate_rtl", "generate_testbench"):
                     # The runner may compile any HDL file it can reach (rtl_dir, files next
                     # to the testbench), so every HDL file in the workspace must pass.
                     hdl = sorted(p for p in ws.root.rglob("*") if p.is_file() and p.suffix.lower() in (".v", ".sv", ".vh", ".svh"))

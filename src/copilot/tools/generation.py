@@ -1,4 +1,4 @@
-"""Skills that create NEW files: generate_rtl.
+"""Skills that create NEW files: generate_rtl, generate_testbench.
 
 Requirements -> interface spec + assumptions (docs.draft_interface_spec) ->
 module (Nemotron, given the spec and a style sample read from the repo) ->
@@ -21,9 +21,10 @@ from typing import Callable
 
 from ..llm import count_model_calls, get_client, json_completion
 from .docs import draft_interface_spec
-from .hdl_safety import access_features
+from .hdl_safety import access_features, escaping_access, is_safe_dump, nonliteral_paths
+from . import module_modifier
 from .module_modifier import NewFilePathError, check_new_file_path, stage_pending, unified_diff_text
-from .rtl_files import is_testbench, project_files
+from .rtl_files import _instantiates, is_testbench, project_files
 from .verification import _tool_available, lint_checker
 from .verify_loop import _copy_project, _inside
 
@@ -352,9 +353,8 @@ def rtl_rounds(text: str, module: str, root: Path, target: Path, connect: list[P
                 check["compile"] == "ok" and not check["lint_ran"] and check["interface"] != "mismatch"):
             break
         messages += [{"role": "assistant", "content": json.dumps({"verilog": code})},
-                     {"role": "user", "content": "Your file failed these checks (iverilog compile, Verilator "
-                      "lint, interface vs the spec):\n" + "\n".join(rounds[-1]["errors"])
-                      + "\nReturn the complete corrected file."}]
+                     {"role": "user", "content": _feedback(code, t_target.name, rounds[-1]["errors"],
+                                                           _hints(rounds[-1]["errors"], target.suffix.lower()))}]
     return code, rounds, check
 
 
@@ -439,6 +439,327 @@ def generate_rtl(
     }
 
 
+# ----------------------------------------------------------- testbenches
+
+_TB_PROMPT = """\
+You write a self-checking Verilog testbench for ONE module. Respond with ONLY a JSON object:
+{{"testbench": "<the complete file>", "notes": "<one or two sentences>"}}
+Rules: one top module named {tb_name} that instantiates {module} with named port connections; a clock if the \
+module has one; apply and release reset first and check the reset state; one directed test per requirement plus \
+edge cases (e.g. full, empty, overflow, simultaneous operations, parameter extremes); compute expected values in \
+variables named expected_* from the requirements (not by copying the RTL); after every check print exactly one \
+line that starts with "PASS: " or "FAIL: " followed by the check name and, for FAIL, got=<value> expected=<value>; \
+count failures and end with one line "DONE: <checks> checks, <wrong> wrong" (no other line may contain the words \
+pass, fail, error or mismatch); {dump_rule} add a watchdog that prints a FAIL line and calls $finish if the test \
+hangs; end with $finish. {language_rule} No other system tasks that touch files or processes, no `include. \
+Follow the repository style facts (clock/reset names, indentation). Keep it compact (about 150 lines): one check \
+task, loops for repeated operations.
+Timing discipline for clocked designs (most testbench bugs are here): change inputs only at the falling clock edge; \
+check outputs at the next falling edge, i.e. after the rising edge that updates them has fully settled, never at \
+the rising edge itself; update the expected_* reference model in the same step as the inputs that cause the \
+change, following the module's stated latency."""
+_TB_LANGUAGE = {
+    ".v": ("Plain Verilog-2005 (no SystemVerilog constructs): declare every variable at module level, never "
+           "inside a task body or an unnamed begin/end block."),
+    ".sv": "SystemVerilog constructs are allowed.",
+}
+_DUMP_RULE = 'dump a waveform with $dumpfile("{vcd}") and $dumpvars(0, {tb_name});'
+_NO_DUMP_RULE = "do not dump a waveform (no $dumpfile/$dumpvars: not allowed here);"
+
+
+def generated_risks(code: str, allow_dump: bool) -> list[str]:
+    """File/process access in a generated file. A testbench may only dump a
+    waveform into its run folder (when allow_dump); anything else is refused."""
+    return sorted(k for k in access_features(code) if not (allow_dump and is_safe_dump(k)))
+
+
+def _new_files_guard(generated: set[Path], allow_dump: bool, outer):
+    """compile_check for simulating generated files: they may only use a
+    safe waveform dump; the repo's own (unchanged) files may not write
+    outside the run folder or start a process (checked after preprocessing,
+    so a macro can't hide it)."""
+    from .verify_loop import _expand  # local: verify_loop imports from this package too
+
+    def check(files: list[Path]) -> str | None:
+        if outer is not None and (reason := outer(files)):
+            return reason
+        paths = [Path(f).resolve() for f in files]
+        for p in paths:
+            if p in generated and (bad := generated_risks(p.read_text(encoding="utf-8"), allow_dump)):
+                return f"The generated {p.name} uses {', '.join(bad[:3])}; not simulated."
+        expanded = _expand(paths)
+        if expanded is None:
+            return "The sources could not be preprocessed, so they were not simulated."
+        features = access_features(expanded)
+        if escaping := escaping_access(features):
+            return f"These sources write outside the simulation folder or run a process ({', '.join(escaping[:3])})."
+        if nonliteral := nonliteral_paths(features):
+            # A generated testbench could steer a parameterised path in the repo's
+            # own code (e.g. via #(.PATH(...))), so such designs are not run unreviewed.
+            return f"These sources open files through a non-literal path ({', '.join(nonliteral[:3])}); not simulated."
+        return None
+
+    return check
+
+
+def _tb_table(rounds: list[dict]) -> str:
+    rows = ["| Round | Change | Audit | Simulation | Root cause / errors fed back |", "|---|---|---|---|---|"]
+    for r in rounds:
+        why = "; ".join(r["errors"][:2]).replace("|", "\\|") or "-"
+        rows.append(f"| {r['round']} | {r['change']} | {r['audit']} | {r['simulation']} | {why[:200]} |")
+    return "\n".join(rows)
+
+
+def tb_rounds(module_code: str, module: str, text: str, style: dict, t_module: Path, t_tb: Path,
+              spec_file: Path, compile_check, module_is_new: bool = False,
+              copy_root: Path | None = None) -> tuple[str, list[dict], dict]:
+    """Generate the testbench in the temp copy, then per round: safety
+    check; compile + simulate (no model call, so compile errors come back
+    first); testbench_auditor on its expected values (RTL/spec); and on a
+    failing simulation debug_failing_test's diagnosis to tell whether the
+    RTL or the testbench is wrong. A testbench fault is fed back (max
+    _MAX_ROUNDS model edits); an RTL fault stops: the RTL is not this
+    skill's to change. "passed" needs a passing run AND a complete audit.
+    Returns (code, rounds, verdict)."""
+    from .debugging import diagnose_failure, testbench_auditor  # local: avoids an import cycle
+    from .verification import testbench_runner
+
+    tb_name = t_tb.stem
+    copy_root = copy_root or t_module.parent  # an RTL culprit must be a file of the copy
+    allow_dump = compile_check is None  # the web demo forbids dump files
+    dump_rule = _DUMP_RULE.format(vcd=f"{tb_name}.vcd", tb_name=tb_name) if allow_dump else _NO_DUMP_RULE
+    iface = module_interface(module_code, module) or {}
+    rtl_dir = str(t_module.parent)  # sibling RTL the module may instantiate
+    messages = [
+        {"role": "system", "content": _TB_PROMPT.format(tb_name=tb_name, module=module, dump_rule=dump_rule,
+                                                        language_rule=_TB_LANGUAGE[t_tb.suffix.lower()])},
+        {"role": "user", "content": (f"Requirements:\n{text}\n\nModule {module} ({t_module.name}):\n{module_code}\n"
+                                     f"Parsed interface: {json.dumps(iface, default=list)}\n"
+                                     f"Repository testbench style facts: {json.dumps(style['facts'])}\n"
+                                     + (f"Style sample:\n{style['excerpt']}\n" if style["excerpt"] else ""))},
+    ]
+    # Generated files: the testbench, and the module only if it is new too.
+    generated = {t_tb.resolve(), *([t_module.resolve()] if module_is_new else [])}
+    guard = _new_files_guard(generated, allow_dump, compile_check)
+    rounds: list[dict] = []
+    verdict = {"status": "still_failing"}
+    code = ""
+    for rnd in range(1, _MAX_ROUNDS + 1):
+        code, notes = _ask_code(messages, "testbench")
+        row = {"round": rnd, "change": "first version" if rnd == 1 else "fixed the testbench",
+               "audit": "not run", "simulation": "not run", "errors": [], "notes": notes}
+        rounds.append(row)
+        verdict = {"status": "still_failing"}
+        if bad := generated_risks(code, allow_dump):
+            row["errors"] = [f"The testbench must not use {', '.join(bad[:4])} (only the waveform dump is allowed)."]
+            verdict = {"status": "unsafe", "message": row["errors"][0]}
+        elif not _instantiates(_STRIP_RE.sub(" ", code), module):
+            row["errors"] = [f"The testbench never instantiates {module}: add `{module} dut (...)` with named "
+                             "connections to every port."]
+        else:
+            t_tb.parent.mkdir(parents=True, exist_ok=True)
+            t_tb.write_text(code, encoding="utf-8")
+            # 1. Compile + simulate: no model call, and compile errors are the cheapest to fix.
+            run = testbench_runner(module_path=str(t_module), tb_path=str(t_tb), rtl_dir=rtl_dir, compile_check=guard)
+            if run.get("status") == "compile_error":
+                # One quick repair inside the round (a stray "}" shouldn't cost a round).
+                errors = [l for l in run.get("stderr", "").splitlines() if l.strip()][:20]
+                errors = [e.replace(str(t_tb.parent), ".") for e in errors]
+                repair = messages + [{"role": "assistant", "content": json.dumps({"testbench": code})},
+                                     {"role": "user", "content": _feedback(code, t_tb.name, errors,
+                                                                           _hints(errors, t_tb.suffix.lower()))}]
+                fixed, _ = _ask_code(repair, "testbench")
+                if not generated_risks(fixed, allow_dump) and _instantiates(_STRIP_RE.sub(" ", fixed), module):
+                    code = fixed
+                    t_tb.write_text(code, encoding="utf-8")
+                    row["change"] += " + compile fix"
+                    run = testbench_runner(module_path=str(t_module), tb_path=str(t_tb), rtl_dir=rtl_dir,
+                                           compile_check=guard)
+            status = run.get("status")
+            row["simulation"] = {"pass": f"pass ({run.get('pass_lines', 0)} checks)",
+                                 "fail_or_unknown": f"FAIL ({run.get('fail_lines', 0)} failing)"}.get(status, status)
+            if status == "blocked":
+                verdict = {"status": "blocked", "message": run.get("message")}
+                break
+            if status == "compile_error":
+                errors = [l for l in run.get("stderr", "").splitlines() if l.strip()][:20]
+                row["errors"] = errors + _hints(errors, t_tb.suffix.lower())
+            else:
+                # 2. Expected values vs the RTL/spec. Only high-severity or rule findings
+                # are fed back; the rest are reported (a reference model draws noise).
+                audit = testbench_auditor(tb_path=str(t_tb), module_path=str(t_module), rtl_dir=rtl_dir,
+                                          spec_path=str(spec_file))
+                findings = audit.get("findings", []) if audit.get("status") == "ok" else []
+                blocking = [f for f in findings if f.get("severity") == "high" or f.get("source") == "rule"]
+                complete = audit.get("status") == "ok" and audit.get("coverage") == "complete"
+                row["audit"] = (f"{len(blocking)} issue(s)" if blocking else
+                                ("clean" if complete else f"incomplete ({audit.get('coverage') or audit.get('status')})"))
+                if minor := [f for f in findings if f not in blocking]:
+                    row["audit"] += f", {len(minor)} minor note(s)"
+                row["audit_notes"] = [f"{t_tb.name}:{f['line']}: {f['explanation']}" for f in minor][:10]
+                if audit.get("status") == "no_expected_values":
+                    row["errors"] = ["No expected values found: compute them in variables named expected_* "
+                                     "so they can be checked against the RTL and spec."]
+                elif blocking:
+                    row["errors"] = [f"{t_tb.name}:{f['line']}: expected value wrong: {f['explanation']}" for f in blocking]
+                elif status == "pass":
+                    verdict = {"status": "passed" if complete else "passed_audit_incomplete",
+                               "audit": audit.get("model_review") or audit.get("coverage")}
+                    break
+                elif status == "fail_or_unknown" and run.get("fail_lines"):
+                    # 3. Who is wrong: the RTL or the testbench?
+                    diag, _ = diagnose_failure(str(t_tb), module_path=str(t_module), rtl_dir=rtl_dir,
+                                               compile_check=guard)
+                    blamed = Path(str(diag.get("file") or ""))
+                    resolved = diag.get("status") == "failing" and blamed.is_file() and _inside(blamed, copy_root)
+                    if resolved:
+                        culprit = blamed.name
+                        where = f"{culprit}:{diag.get('line') or '?'}"
+                        if blamed.resolve() != t_tb.resolve():
+                            # The RTL is wrong, not the testbench: say so and stop.
+                            row["errors"] = [f"RTL bug at {where} ({diag.get('confidence')}): {diag.get('root_cause')}"]
+                            verdict = {"status": "rtl_suspect", "file": culprit, "line": diag.get("line"),
+                                       "confidence": diag.get("confidence"), "root_cause": diag.get("root_cause")}
+                            break
+                        row["errors"] = [f"Testbench bug at {where}: {diag.get('root_cause')}"] + [
+                            f"Simulation output: {line}" for line in run.get("first_failures", [])[:5]]
+                    else:  # no diagnosis, or it named no file of the design: keep it a testbench round
+                        row["errors"] = [str(diag.get("root_cause") or run.get("headline") or "the simulation failed")] + [
+                            f"Simulation output: {line}" for line in run.get("first_failures", [])[:5]]
+                else:
+                    row["errors"] = [str(run.get("message") or run.get("headline") or status)]
+        row["errors"] = [e.replace(str(t_tb.parent), ".") for e in row["errors"]]
+        messages += [{"role": "assistant", "content": json.dumps({"testbench": code})},
+                     {"role": "user", "content": _feedback(code, t_tb.name, row["errors"], [])}]
+    return code, rounds, verdict
+
+
+def _feedback(code: str, file_name: str, errors: list[str], hints: list[str]) -> str:
+    """The retry message: the errors, the numbered source lines they point
+    at (so the exact bad line is visible), and a request for a minimal fix
+    (regenerating the whole file tends to introduce new mistakes)."""
+    lines = code.splitlines()
+    wanted = sorted({int(n) for e in errors for n in re.findall(rf"{re.escape(file_name)}:(\d+)", e)})[:8]
+    shown: list[str] = []
+    for n in wanted:
+        for i in range(max(1, n - 2), min(len(lines), n + 2) + 1):
+            entry = f"{i:4d}| {lines[i - 1]}"
+            if entry not in shown:
+                shown.append(entry)
+    context = ("\nThe lines they point at:\n" + "\n".join(shown)) if shown else ""
+    return ("The file failed these checks:\n" + "\n".join(errors + hints) + context
+            + "\nFix exactly these problems with the smallest change; keep every other line identical. "
+            "Return the complete corrected file.")
+
+
+def _hints(errors: list[str], suffix: str) -> list[str]:
+    """Plain-language fixes for compiler errors models tend to repeat."""
+    text = "\n".join(errors)
+    hints = []
+    if "requires SystemVerilog" in text and suffix == ".v":
+        hints.append("HINT: this file must be plain Verilog-2005. Declare every variable at module level, never "
+                     "inside a task body or an unnamed begin/end block, and use no SystemVerilog syntax.")
+    return hints
+
+
+def _module_source(module_path: str, root: Path) -> tuple[Path, str, bool]:
+    """(path, code, pending): an existing module file inside the repo, or one
+    just generated and still waiting in the pending store as a new file."""
+    path = (Path(module_path) if Path(module_path).is_absolute() else root / module_path).resolve()
+    if not _inside(path, root):
+        raise ValueError(f"module_path '{module_path}' is outside the repo root.")
+    if path.is_file():
+        return path, path.read_text(encoding="utf-8"), False
+    for entry in module_modifier._load_pending().values():
+        for item in entry.get("files", [entry]):
+            if item.get("create") and Path(item.get("module_path", "")).resolve() == path:
+                return path, item["new_content"], True
+    raise ValueError(f"No module at '{module_path}' (neither on disk nor a pending new file).")
+
+
+def generate_testbench(
+    module_path: str,
+    repo_root: str,
+    target_path: str = "",
+    requirements: str = "",
+    spec_path: str = "",
+    compile_check: Callable[[list[Path]], str | None] | None = None,
+) -> dict:
+    """Writes a NEW self-checking testbench for a module (existing, or just
+    generated and still pending), checks its expected values with
+    testbench_auditor, runs it in a temp copy of the repo and, if it fails,
+    uses debug_failing_test's diagnosis to say whether the RTL or the
+    testbench is wrong (file:line). Stages the testbench as a new-file diff
+    for apply_diff; writes nothing itself."""
+    try:
+        root = Path(repo_root).resolve() if repo_root else None
+        if root is None or not root.is_dir():
+            raise ValueError("repo_root must be an existing folder.")
+        module_file, module_code, pending = _module_source(module_path, root)
+        names = re.findall(r"\bmodule\s+([A-Za-z_]\w*)", _STRIP_RE.sub(" ", module_code))
+        if not names:
+            raise ValueError(f"No module defined in {module_file.name}.")
+        module = names[0]
+        target = check_new_file_path(str(root), target_path or str(module_file.parent / f"{module}_tb.v"))
+        if target.suffix.lower() not in (".v", ".sv"):
+            raise ValueError("The testbench file must end in .v or .sv.")
+        text = str(requirements or "").strip()
+        if spec_path:
+            spec_file = Path(spec_path).resolve()
+            if not spec_file.is_file():
+                raise ValueError(f"No spec file at '{spec_path}'.")
+            text += "\n\nSpec file:\n" + spec_file.read_text(encoding="utf-8", errors="replace")[:_SPEC_MAX_CHARS]
+    except (ValueError, NewFilePathError, OSError) as exc:
+        return {"status": "error", "message": str(exc)}
+    if not (_tool_available("iverilog") and _tool_available("vvp")):
+        return {"status": "unavailable", "message": "iverilog/vvp not found on PATH; the testbench can't be run."}
+    style = style_sample(root, target, testbench=True)
+
+    with count_model_calls() as calls:
+        tmp = Path(tempfile.mkdtemp(prefix="copilot_generate_")).resolve()
+        try:
+            proj = tmp / "project"
+            _copy_project(root, proj)
+            t_module, t_tb = proj / module_file.relative_to(root), proj / target.relative_to(root)
+            if pending:
+                t_module.parent.mkdir(parents=True, exist_ok=True)
+                t_module.write_text(module_code, encoding="utf-8")
+            spec_file = tmp / "requirements.md"
+            spec_file.write_text(text or f"(no written requirements; test {module} by its ports)", encoding="utf-8")
+            try:
+                code, rounds, verdict = tb_rounds(module_code, module, text or "(none given)", style, t_module, t_tb,
+                                                  spec_file, compile_check, module_is_new=pending, copy_root=proj)
+            except Exception as exc:  # noqa: BLE001 - report, clean up below
+                return {"status": "error", "message": f"Testbench generation stopped ({type(exc).__name__}: {exc})."}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            removed = not tmp.exists()
+        n_calls = calls[0]
+
+    rel = target.relative_to(root).as_posix()
+    base = {"module": module, "module_file": module_file.relative_to(root).as_posix(), "module_pending": pending,
+            "file": rel, "rounds": rounds, "rounds_table": _tb_table(rounds), "model_calls": n_calls,
+            "temp_copy_removed": removed}
+    if verdict["status"] in ("unsafe", "blocked"):
+        return {**base, "status": "blocked", "message": verdict.get("message"), "pending_diff": None}
+    diff_id = stage_pending([(str(target), code)], creates={str(target)}, repo_root=str(root))
+    note = (f"Nothing was written: {rel} is a proposed NEW file, pending diff {diff_id}. Only apply_diff creates it, "
+            "after showing it and getting the user's explicit yes.")
+    if verdict["status"] == "rtl_suspect":
+        note = (f"The testbench looks right; the RTL is the likely culprit at {verdict['file']}:{verdict['line']} "
+                f"({verdict['confidence']} confidence): {verdict['root_cause']} Fix that with modify_module. " + note)
+    elif verdict["status"] == "passed_audit_incomplete":
+        note = ("It passes, but the expected-value audit was incomplete "
+                f"({verdict.get('audit')}), so verification is partial. " + note)
+    elif verdict["status"] != "passed":
+        note = f"The testbench still fails after {len(rounds)} round(s); review before deciding. " + note
+    return {**base, "status": verdict["status"],
+            **({"rtl_bug": {k: verdict[k] for k in ("file", "line", "confidence", "root_cause")}}
+               if verdict["status"] == "rtl_suspect" else {}),
+            "diff": unified_diff_text("", code, str(target), new_file=True),
+            "pending_diff": {"diff_id": diff_id, "files": [rel]}, "note": note}
+
+
 SCHEMAS = [
     {
         "type": "function",
@@ -466,6 +787,30 @@ SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_testbench",
+            "description": (
+                "Create a NEW self-checking testbench for a module (an existing file, or one generate_rtl just "
+                "proposed): reset, one directed test per requirement, edge cases, PASS/FAIL lines and a summary. "
+                "Checks its expected values with testbench_auditor, runs it in a temp copy and, if it fails, says "
+                "whether the RTL or the testbench is wrong (file:line). Stages it as a new-file diff for apply_diff; "
+                "writes nothing itself and never overwrites."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module_path": {"type": "string", "description": "The module to test (in the repo, or pending)."},
+                    "repo_root": {"type": "string", "description": "The project repo; nothing is written outside it."},
+                    "target_path": {"type": "string", "description": "New testbench path (default <module>_tb.v next to it)."},
+                    "requirements": {"type": "string", "description": "What the module must do (used for the checks)."},
+                    "spec_path": {"type": "string", "description": "Optional spec file."},
+                },
+                "required": ["module_path", "repo_root"],
+            },
+        },
+    },
 ]
 
-IMPLS = {"generate_rtl": generate_rtl}
+IMPLS = {"generate_rtl": generate_rtl, "generate_testbench": generate_testbench}
